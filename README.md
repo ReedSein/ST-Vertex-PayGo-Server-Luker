@@ -9,6 +9,99 @@
 
 ---
 
+## 0.5.0：Google OpenAI 兼容桥接
+
+0.5.0（2026-10-14）提供可选的本机 OpenAI 兼容入口，需配套 0.5.0 前端管理；仅支持 **SillyTavern / Luker，TauriTavern 不支持桥接**。从旧版本升级后，桥接首次仍需用户手动启用；成功启用后会保存设置，并在后续宿主启动时自动恢复。没有保存配置的用户默认关闭。
+
+桥接对外提供 Chat Completions 请求，默认转发到以下 Google 官方 OpenAI 兼容端点：
+
+- AI Studio：`https://generativelanguage.googleapis.com/v1beta/openai/chat/completions`，使用宿主保存的 Gemini API key。
+- Vertex AI：`https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{region}/endpoints/openapi/chat/completions`；`global` 使用 `aiplatform.googleapis.com`，由宿主保存的服务账号换取 OAuth access token。
+
+Vertex 可选择 `mode: "gemini"` 网关，将 OpenAI 请求转换为同一绑定项目、区域和凭据下的原生 `generateContent` / `streamGenerateContent`，再将 Google JSON/SSE 转为 OpenAI JSON/SSE。AI Studio 保持原生 OpenAI 兼容转发，不提供网关或桥接层级策略。Vertex Express/API key 认证暂不支持。桥接不跟随 HTTP 重定向，不自动重试、换账号或失败回退其他协议。官方端点的使用不构成账号安全、免封或合规保证。
+
+### 管理与调用
+
+已登录用户通过宿主路由管理自己的桥接：
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/plugins/vertex-paygo/openai-bridge` | 读取自己的状态、地址和桥接 key |
+| POST | `/api/plugins/vertex-paygo/openai-bridge` | 启用、关闭、手动更新固定连接或轮换 key |
+| GET | `/api/plugins/vertex-paygo/openai-bridge/logs` | 读取当前用户的桥接 API 日志 |
+| POST | `/api/plugins/vertex-paygo/openai-bridge/logs/clear` | 清空当前用户的桥接 API 日志 |
+
+POST 请求示例（配置中没有 Google 凭据明文）：
+
+```json
+{
+  "enabled": true,
+  "connection": {
+    "source": "vertexai",
+    "model": "gemini-2.5-pro",
+    "authMode": "full",
+    "region": "global"
+  }
+}
+```
+
+`secretId` 可选择宿主已保存的凭据。未指定时在启用阶段绑定当前凭据，不随主界面后续换号。`{"enabled": false}` 关闭并撤销访问；`{"enabled": true, "rotateKey": true}` 沿用已绑定连接并轮换桥接 key。
+
+Vertex 管理配置还接受 `mode: "openai" | "gemini"`、`tierSource: "independent" | "follow"`、`tier: "standard" | "flex" | "priority"`。初次启用默认 `openai`、`independent`、`standard`；后续省略字段保留已选策略。切换到 AI Studio 自动恢复默认策略。策略更新会取消正在进行的桥接请求。
+
+独立层级使用桥接保存的 `tier`。跟随主 API 时，每次请求读取当前登录用户在宿主中最近保存的设置：SillyTavern 或没有设置仓库的旧 Luker 使用用户目录的 `settings.json`；具备设置仓库的 Luker 使用绑定用户的可信账户 handle 从仓库读取，兼容文件、SQLite、MySQL、PostgreSQL 存储，仓库失败不回退陈旧文件。层级优先使用活动 Google 连接配置中的 `vertex-paygo` 状态，其次使用 `oai_settings.extensions['vertex-paygo']`；并要求已保存的 `main_api` 为 `openai`、来源为 `vertexai`。跟随仅同步层级及 PayGo-only，不改变桥接绑定的模型、区域或凭据。保存设置无法读取、超过 8 MiB、层级无效或来源不匹配均明确报错，不降级。界面状态返回 `effectiveTier`，读取失败时为 `null`，`tierError` 提供安全错误说明；此时仍可关闭或更改策略。
+
+Vertex Flex 仅在 Gemini 网关模式可用，原生 OpenAI 模式拒绝 Flex；Flex 和 Priority 都要求桥接绑定区域为 `global`，插件不会自动修改区域。服务器独立构造 PayGo 头，Flex 带 `X-Server-Timeout: 1800`，生成总期限为 30 分钟（普通请求与模型目录为 180 秒）。Vertex 外部请求中的 `service_tier`、`serviceTier` 字段会被拒绝，客户端不能覆盖桥接策略。具体模型与项目是否支持该层级由 Google 判断。
+
+管理状态包含 `debugLocalAccess`，默认 `false`。启用桥接时可一并提交该布尔值；已启用时用 `{"enabled": true, "debugLocalAccess": true}` 开启本机浏览器跨域调试，传 `false` 关闭。省略时保留原值；成功保存的调试设置会随桥接启动恢复，关闭桥接后重新启用默认关闭。调试设置更新同样会取消未完成请求。
+
+启用后，默认返回固定 Base URL `http://127.0.0.1:18443/openai/v1`。调用方使用独立桥接 key 作为 Bearer 凭据，调用 `GET /models` 或 `POST /chat/completions`。模型别名 `st-current` 表示**桥接绑定模型**，并非实时主聊天模型。调用者也可显式选择合法的 `gemini-*` 模型；Vertex 会添加 `google/` 前缀。
+
+### 固定端口
+
+首次启动会在 **ST/Luker 宿主根目录**创建 `st-vertex-paygo-bridge.json`：
+
+```json
+{ "port": 18443 }
+```
+
+需要更换端口时编辑该文件，填写 1024–65535 的整数并重启宿主。同一台电脑运行多个宿主实例时，为它们选择不同端口。配置无效或端口被占用时，桥接明确报错，不自动选择随机端口；主聊天 PayGo 传输仍可工作。桥接只监听 `127.0.0.1`，不开放外网监听配置。主聊天内部传输继续使用独立动态端口。
+
+### 专用 API 日志
+
+桥接启用后自动记录持有效桥接 key 的调用。前端“桥接 API 日志”可以手动刷新、展开查看和清空；日志读取及清空仅使用当前 ST/Luker 登录用户的目录，不向 Debug 浏览器开放。
+
+日志位置：`<当前用户目录>/vertex-paygo/openai-bridge-logs.json`。重启保留，最新请求在前；最多保留 50 条及 20 MiB，超过时淘汰最早记录。每个正文最多捕获 1 MiB，超过会标记截断。包含时间、路径、HTTP 状态、耗时、原始请求、转发请求、客户端响应及错误；Gemini 网关中转发正文是原生 Gemini 格式，上游原始正文单独记录，客户端响应为 OpenAI 格式。SSE 保留相应事件原文，模型发现另显示 Google 原始分页正文。中断与未接收完整的请求体有单独标记。
+
+这些日志**包含提示词及模型输出**，与主聊天的无正文诊断日志不同。不记录认证头，已知桥接 key、实际使用的 Google token/key 及已持有的服务账号私钥会脱敏，包括按 ID 选择的凭据和捕获边界处的凭据片段。识别出 JSON 转义后的凭据时会省略整个正文字段；嵌套转义过深或末尾转义不完整时也会保守省略，并显示原因。普通正文保留原文；这不是通用敏感信息检测，正文里用户自行填写的其他敏感内容仍属于原文。无有效 key 的请求不能归属到用户，不写入用户日志。日志写入失败不会影响 API 调用；磁盘繁忙时待写队列有界（每用户 4 条、全局 16 条），超出会跳过记录，因此不是保证无遗漏的审计系统。
+
+### 模型目录
+
+`GET /openai/v1/models` 每次查询绑定提供商的官方模型目录，并返回 OpenAI 格式的 `data` 数组，包含 `st-current`、绑定模型及发现的 Gemini 模型。不使用 PayGo 支持名单限制选模，也不发送生成请求探测模型。
+
+- AI Studio：`GET https://generativelanguage.googleapis.com/v1beta/openai/models`，使用绑定 key 的 Bearer 认证。
+- Vertex Full：`GET https://{regional-host}/v1beta1/publishers/google/models?view=PUBLISHER_MODEL_VIEW_FULL&listAllVersions=true&pageSize=100`，使用绑定服务账号的 OAuth；`global` 使用 `aiplatform.googleapis.com`，其他区域使用 `{region}-aiplatform.googleapis.com`。跟随 `nextPageToken` 遍历分页，不跟随任意上游 URL。
+- 仅返回合法 Gemini 模型名称，过滤 embedding、Live、原生音频、TTS 专用名称并去重；不把目录内部 `versionId` 拼成调用 ID。Vertex 返回 `google/gemini-*`，AI Studio 返回 `gemini-*`。
+- 目录不代表项目、区域或生成接口的调用权限保证。调用端可直接在 `model` 指定具体名称，实际支持由 Google 校验；生成接口按桥接选择的模式固定。
+- 查询错误直接返回，不用静态列表掩盖失败。目录查询也受鉴权、取消、并发与总超时限制；最多读取 100 页、累计 8 MiB，超过限制明确报错，不返回截断名单。
+
+模型目录路由不受网关模式或层级影响。参考：[AI Studio 模型发现](https://ai.google.dev/gemini-api/docs/openai#list_models)、[Vertex 官方模型目录](https://docs.cloud.google.com/gemini-enterprise-agent-platform/reference/rest/v1beta1/publishers.models/list)。
+
+### 生命周期与隔离
+
+- 使用独立的固定端口回环监听器，不提供外网监听。本机命令行、SDK、ST/Luker 插件及其他服务均可持桥接 key 调用，不限定客户端软件。
+- 默认不允许浏览器跨域。`debugLocalAccess` 开启后，仅允许 `http(s)://localhost`、`http(s)://127.0.0.1`、`http(s)://[::1]` 的任意端口来源；不允许 `null`、`file://` 或公网来源。预检不要求 Bearer，但实际请求必须匹配已开启 Debug 的用户 key，不共享其他用户的调试权限；不开放管理接口 CORS。
+- 每个宿主用户使用独立连接和随机桥接 key。请求只使用该用户绑定的 Google 凭据；不转发调用方的认证头、Cookie 或自定义上游地址。
+- 连接配置和桥接 key 按用户保存在 `vertex-paygo/openai-bridge-state.json`（原子写入，文件权限 0600，读取上限 16 KiB）；成功开启后，宿主下次启动会从可信启用用户列表自动恢复，无需打开浏览器，地址和 key 保持不变。关闭会保存关闭状态，无旧文件默认关闭。恢复失败保持实际关闭并记录安全错误，可在管理界面重新配置或关闭以清除启动记忆；不会改用其他凭据。具名凭据保留固定 ID，旧式无 ID 凭据只保存 SHA256 指纹，恢复时必须匹配。此文件不保存 Google API key、OAuth token 或服务账号私钥；桥接 key 本身可调用该用户绑定的 Google 接口，应按敏感文件保护。关闭、手动更新连接或轮换 key 都会取消对应未完成请求；关闭和轮换还会撤销旧 key。
+- 显式选择的凭据不存在时拒绝，不回退其他账号。宿主不能提供活动凭据 ID 时，使用私有凭据快照；检测到活动凭据改变或删除后停止请求，需手动更新连接。
+- 请求体上限 16 MiB，每用户最多 4 个、全局最多 16 个并发请求；从接收请求起总时限为 180 秒，包含流式输出。下游取消会终止上游生成传输。Google JSON/SSE 响应内容和错误状态直接返回；专用 API 日志记录请求与响应正文，和不记录正文的主聊天诊断日志分开。
+- 宿主的 Vertex OAuth 辅助函数不支持取消：超时或取消后，尚未结束的认证仍占用并发名额，直到认证结束；轮换 key 或重新启用不会重置名额。若宿主认证永久挂起，需重启宿主释放名额。取消的调用不会在认证结束后发起生成请求。
+- 不继承现有 PayGo 层级设置，不建立主聊天用量账本记录。调用插件提供的官方兼容参数由上游判断是否支持。
+
+参考：[AI Studio 官方兼容协议](https://ai.google.dev/gemini-api/docs/openai)、[Vertex AI 官方兼容协议](https://docs.cloud.google.com/vertex-ai/generative-ai/docs/start/openai)。
+
+---
+
 ## 为什么需要此后端插件？
 
 SillyTavern 与 Luker 原生请求管道并未对外暴露 Google 专有的 PayGo 调度层级标头与请求体参数。为了在**不侵入式篡改宿主源码、不破坏原生密钥安全存储机制**的前提下实现层级调度，必须采用前后端分离协作架构：
@@ -28,7 +121,7 @@ SillyTavern 与 Luker 原生请求管道并未对外暴露 Google 专有的 PayG
 - **宿主程序**：SillyTavern ≥ 1.16.0 或 Luker ≥ 2.7.0（release 分支）
 - **运行环境**：Node.js ≥ 20
 - **前置依赖**：宿主内已配置可用的 Vertex AI（Express 快速密钥模式或 Service Account 服务账号均可）
-- **配套组件**：本插件与 `ST-Vertex-PayGo` 前端扩展均更新至 0.4.0（协议 v2），更新后重启酒馆并刷新前端页面
+- **配套组件**：本插件与 `ST-Vertex-PayGo` 前端扩展均更新至 0.5.0（协议 v2），更新后重启酒馆并刷新前端页面
 
 > 💡 **启动防御机制**：插件启动时会自动对宿主的 `package.json` 与 `src/endpoints/google.js` 进行静态完整性校验。若宿主版本过低或核心路由被第三方破坏，插件将主动终止初始化以防引发未定义崩溃。
 
@@ -126,16 +219,16 @@ Google AI Studio 的 Standard 与 Flex 模式复用相同的预检机制、鉴�
 - **接口安全与权限隔离**：
   - **严格权限控制**：诊断日志包含全局会话元数据，日志读取端点 `GET /api/plugins/vertex-paygo/logs` 仅对拥有**管理员权限**的已登录会话开放，并显式禁用下游缓存；
   - **受限上报通道**：客户端日志通过 `POST /api/plugins/vertex-paygo/logs/client` 接入，要求专有 MIME 类型 `application/vnd.st-vertex-paygo.client-log+json`，在 JSON 解析前执行 4 KiB 字节硬拦截，仅允许录入预设白名单枚举值，严禁上报任意自由文本或复杂对象。
-- **绝对脱敏守则**：日志系统从架构上绝对禁止记录以下信息：Google 鉴权 Token、API Key 原文、服务账号私钥、Ticket 原文、代理 Token、生成提示词（Prompt）、模型生成回复及错误堆栈。
+- **诊断日志脱敏**：此通用诊断日志不记录 Google 鉴权 Token、API Key 原文、服务账号私钥、Ticket 原文、代理 Token、生成提示词（Prompt）、模型生成回复及错误堆栈。桥接专用 API 正文日志独立存储，见上述桥接说明。
 
 ---
 
 ## 安全机制与多租户隔离
 
-- **本地专属监听**：服务只监听 `127.0.0.1` 随机动态端口，坚决拒绝向局域网（0.0.0.0）或公网开放。
+- **本地专属监听**：服务只监听 `127.0.0.1`；主聊天内部传输使用动态端口，桥接使用固定端口，不向局域网（0.0.0.0）或公网开放。
 - **一次性票据防护**：票据生存期限制为 5 分钟，且具备单次核销特性，伴随高熵 Bearer Token 二次认证。
 - **用户级限流与熔断**：全局默认最大保留 256 张活动票据，单用户最多持有 32 张未消费票据；单用户限制每分钟最多 30 次签发预检。配额在读取昂贵的 Google 认证前先行扣减，认证失败即刻退还槽位。
-- **纯内存运行**：所有鉴权缓存、临时 Token 与票据状态完全基于内存，进程终止或重启立刻销毁，绝不落盘。
+- **纯内存运行**：Google 鉴权缓存、临时 Token 与主聊天票据状态完全基于内存，进程终止或重启立刻销毁；桥接启用配置及其独立访问 key 按上述方式持久保存。
 - **密钥安全与显式 ID 解析**：
   - AI Studio 模式下，指定的 `secret_id` 必须严格在宿主凭据库中匹配当前用户归属，查无此 Key 时直接报错中断，**坚决不回退到默认密钥**；
   - Vertex Express/Full 的 `secret_id` 同样按当前用户及 ID 严格读取；找不到时返回错误，不回退默认密钥。Vertex Full 使用宿主导出的 JWT/OAuth 辅助函数为所选 Service Account 鉴权，并从同一份凭据取得项目 ID；宿主缺少这些窄接口时会明确拒绝。未指定 ID 时继续使用宿主默认认证。

@@ -50,6 +50,7 @@ async function loadStRuntime({
     rootDir = process.cwd(),
     readFile = fs.promises.readFile,
     importModule = specifier => import(specifier),
+    fileExists = filename => fs.existsSync(filename),
 } = {}) {
     const resolvedRoot = path.resolve(rootDir);
     let packageData;
@@ -61,6 +62,28 @@ async function loadStRuntime({
 
     if (!isSupportedHost(packageData)) {
         throw new PluginError(500, 'INCOMPATIBLE_SILLYTAVERN', 'This plugin requires SillyTavern 1.16.0 or newer, or a compatible Luker runtime.');
+    }
+
+    // New Luker installations store authoritative settings in a repository,
+    // which may use a database. Existing repository failures must never cause
+    // the bridge to read an obsolete settings.json instead.
+    let readSavedSettings;
+    const storagePath = path.join(resolvedRoot, 'src', 'storage', 'index.js');
+    if (packageData.name === 'luker' && await fileExists(storagePath)) {
+        let storage;
+        try { storage = await importModule(pathToFileURL(storagePath).href); } catch { /* Report on follow, leaving independent features available. */ }
+        readSavedSettings = async ownerHandle => {
+            try {
+                if (typeof ownerHandle !== 'string' || !ownerHandle || ownerHandle.length > 256 || /[\x00-\x1f\x7f]/u.test(ownerHandle)) throw new Error('Missing authenticated settings owner');
+                if (typeof storage?.getSettingsRepo !== 'function') throw new Error('Missing settings repository');
+                const repo = storage.getSettingsRepo();
+                const read = typeof repo?.get === 'function' ? repo.get : repo?.load;
+                if (typeof read !== 'function') throw new Error('Missing repository reader');
+                return await read.call(repo, ownerHandle);
+            } catch {
+                throw new PluginError(409, 'BRIDGE_FOLLOW_SETTINGS_UNAVAILABLE', 'The saved main API settings could not be read from the host settings repository. Save the settings and retry.');
+            }
+        };
     }
 
     const googleModuleUrl = pathToFileURL(path.join(resolvedRoot, 'src', 'endpoints', 'google.js')).href;
@@ -171,11 +194,99 @@ async function loadStRuntime({
         };
     };
 
+    const resolveOpenAIConnection = (request, connection) => {
+        const directories = request?.user?.directories;
+        if (!directories?.root) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated user is required.');
+        const secretKey = connection.source === 'makersuite' ? secretsModule.SECRET_KEYS.MAKERSUITE : secretsModule.SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT;
+        let secretId = connection.secretId;
+        if (!secretId && typeof secretsModule.readSecretState === 'function') {
+            const entries = secretsModule.readSecretState(directories)?.[secretKey];
+            if (Array.isArray(entries)) secretId = entries.find(entry => entry?.active && typeof entry.id === 'string')?.id;
+        }
+        const credential = secretsModule.readSecret(directories, secretKey, secretId);
+        if (typeof credential !== 'string' || !credential) throw new PluginError(400, 'GOOGLE_SECRET_NOT_FOUND', 'The selected Google credential was not found.');
+        return { connection: Object.freeze({ ...connection, ...(secretId ? { secretId } : {}) }), credentialSnapshot: secretId ? undefined : credential, logCredential: credential };
+    };
+
+    const getOpenAIConfig = async (request, connection, authenticate = true, credentialSnapshot) => {
+        const directories = request?.user?.directories;
+        if (!directories?.root) throw new PluginError(401, 'AUTHENTICATED_USER_REQUIRED', 'An authenticated user is required.');
+        const { source, secretId, region } = connection;
+        if (credentialSnapshot !== undefined) {
+            const key = source === 'makersuite' ? secretsModule.SECRET_KEYS.MAKERSUITE : secretsModule.SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT;
+            if (secretsModule.readSecret(directories, key) !== credentialSnapshot) {
+                throw new PluginError(409, 'GOOGLE_CONNECTION_CHANGED', 'The selected Google credential changed. Update the bridge connection.');
+            }
+        }
+        if (source === 'makersuite') {
+            const apiKey = credentialSnapshot ?? secretsModule.readSecret(directories, secretsModule.SECRET_KEYS.MAKERSUITE, secretId);
+            if (!apiKey || typeof apiKey !== 'string') throw new PluginError(400, 'GOOGLE_SECRET_NOT_FOUND', 'The selected Google AI Studio secret was not found.');
+            return { target: 'https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', headers: { Authorization: `Bearer ${apiKey}` }, logCredential: apiKey };
+        }
+        if (source !== 'vertexai' || connection.authMode !== 'full') throw new PluginError(400, 'VERTEX_AUTH_UNSUPPORTED', 'Vertex AI requires full service-account authentication.');
+        const helpers = ['generateJWTToken', 'getAccessToken', 'getProjectIdFromServiceAccount'];
+        if (helpers.some(name => typeof googleModule[name] !== 'function')) throw new PluginError(400, 'VERTEX_AUTH_UNSUPPORTED', 'The host cannot authenticate a Vertex service account.');
+        const serialized = credentialSnapshot ?? secretsModule.readSecret(directories, secretsModule.SECRET_KEYS.VERTEXAI_SERVICE_ACCOUNT, secretId);
+        if (!serialized || typeof serialized !== 'string') throw new PluginError(400, 'GOOGLE_SECRET_NOT_FOUND', 'The selected Vertex service account was not found.');
+        let serviceAccount, projectId;
+        try {
+            serviceAccount = JSON.parse(serialized);
+            projectId = googleModule.getProjectIdFromServiceAccount(serviceAccount);
+        } catch {
+            throw new PluginError(400, 'VERTEX_AUTH_CONFIGURATION_FAILED', 'The Vertex service account is invalid.');
+        }
+        if (!/^[a-z][a-z0-9-]{4,62}$/u.test(projectId)) throw new PluginError(400, 'VERTEX_AUTH_CONFIGURATION_FAILED', 'The Vertex project ID is invalid.');
+        const host = region === 'global' ? 'aiplatform.googleapis.com' : `${region}-aiplatform.googleapis.com`;
+        const target = `https://${host}/v1/projects/${projectId}/locations/${region}/endpoints/openapi/chat/completions`;
+        if (!authenticate) return { target, logCredential: serialized };
+        try {
+            const token = await googleModule.getAccessToken(await googleModule.generateJWTToken(serviceAccount));
+            if (typeof token !== 'string' || !token) throw new Error('Missing token');
+            return { target, headers: { Authorization: `Bearer ${token}` }, logCredential: serialized };
+        } catch {
+            throw new PluginError(502, 'VERTEX_AUTH_FAILED', 'The Vertex service account could not be authenticated.');
+        }
+    };
+
+    const listBridgeUsers = async () => {
+        try {
+            // Use the host account registry, never directories stored in a bridge
+            // configuration. Account-free ST installations return no enabled users.
+            const [users, util, constants] = await Promise.all([
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'users.js')).href),
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'util.js')).href),
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'constants.js')).href),
+            ]);
+            if (typeof users.getAllEnabledUsers !== 'function' || typeof users.getUserDirectories !== 'function'
+                || typeof util.getConfigValue !== 'function') throw new Error('Missing host user registry');
+            const accountsEnabled = util.getConfigValue('enableUserAccounts', false, 'boolean');
+            if (typeof accountsEnabled !== 'boolean') throw new Error('Invalid account configuration');
+            const profiles = accountsEnabled ? await users.getAllEnabledUsers() : [constants.DEFAULT_USER];
+            if (!Array.isArray(profiles)) throw new Error('Invalid user registry');
+            const handles = new Set();
+            return profiles.filter(profile => !accountsEnabled || profile?.enabled === true).map(profile => {
+                const handle = profile?.handle;
+                if (typeof handle !== 'string' || !handle || handle.length > 256 || /[\x00-\x1f\x7f]/u.test(handle)
+                    || handles.has(handle)) throw new Error('Invalid user handle');
+                handles.add(handle);
+                const directories = users.getUserDirectories(handle);
+                if (typeof directories?.root !== 'string' || !path.isAbsolute(directories.root)) throw new Error('Invalid user directory');
+                return { user: { directories: { ...directories }, profile: { handle } } };
+            });
+        } catch {
+            throw new PluginError(503, 'BRIDGE_USERS_UNAVAILABLE', 'The host user registry is unavailable for bridge restoration.');
+        }
+    };
+
     return Object.freeze({
         rootDir: resolvedRoot,
         hostName: packageData.name,
         stVersion: packageData.version,
         getGoogleApiConfig,
+        getOpenAIConfig,
+        resolveOpenAIConnection,
+        listBridgeUsers,
+        ...(readSavedSettings ? { readSavedSettings } : {}),
     });
 }
 

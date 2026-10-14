@@ -9,6 +9,10 @@
 'use strict';
 
 const { createLoopbackTransport } = require('./src/loopback-server.cjs');
+const { createOpenAIBridge } = require('./src/openai-bridge.cjs');
+const { createBridgeListener, readBridgePort } = require('./src/bridge-listener.cjs');
+const { BridgeLogStore } = require('./src/bridge-log-store.cjs');
+const { BridgeStateStore } = require('./src/bridge-state-store.cjs');
 const { LogStore, describeError } = require('./src/log-store.cjs');
 const { PLUGIN_ID } = require('./src/protocol.cjs');
 const { registerRoutes } = require('./src/routes.cjs');
@@ -31,6 +35,8 @@ async function init(router) {
     logStore.server('info', 'plugin_initializing');
     let ticketStore;
     let loopbackTransport;
+    let openaiBridge;
+    let bridgeListener;
     const usageStore = new UsageStore();
     try {
         const stRuntime = await loadStRuntime();
@@ -39,10 +45,25 @@ async function init(router) {
             hostVersion: stRuntime.stVersion,
         });
         ticketStore = new TicketStore();
+        openaiBridge = createOpenAIBridge({ stRuntime, bridgeLogStore: new BridgeLogStore(), stateStore: new BridgeStateStore() });
         loopbackTransport = createLoopbackTransport({ ticketStore, logStore, usageStore });
         await loopbackTransport.start();
-        registerRoutes(router, { stRuntime, ticketStore, loopbackTransport, logStore, usageStore });
-        activeState = { ticketStore, loopbackTransport, logStore, usageStore };
+        try {
+            const port = await readBridgePort();
+            bridgeListener = createBridgeListener({ openaiBridge, port });
+            await bridgeListener.start();
+            logStore.server('info', 'bridge_listener_started', { port });
+            try {
+                await openaiBridge.restore(await stRuntime.listBridgeUsers(), failure => logStore.server('warn', 'bridge_restore_failed', failure));
+            } catch {
+                logStore.server('warn', 'bridge_restore_users_unavailable');
+            }
+        } catch (error) {
+            logStore.server('error', 'bridge_listener_failed', describeError(error));
+            console.warn(`[Vertex PayGo] ${error.code}: ${error.message}`);
+        }
+        registerRoutes(router, { stRuntime, ticketStore, loopbackTransport, logStore, usageStore, openaiBridge });
+        activeState = { ticketStore, loopbackTransport, logStore, usageStore, openaiBridge, bridgeListener };
         logStore.server('info', 'plugin_ready', {
             hostName: stRuntime.hostName,
             hostVersion: stRuntime.stVersion,
@@ -51,6 +72,8 @@ async function init(router) {
         logStore.server('error', 'plugin_initialization_failed', describeError(error));
         try {
             ticketStore?.close();
+            openaiBridge?.close();
+            await bridgeListener?.close();
             await loopbackTransport?.close();
         } catch (cleanupError) {
             logStore.server('error', 'plugin_initialization_cleanup_failed', describeError(cleanupError));
@@ -67,7 +90,9 @@ async function exit() {
     if (!state) return;
     state.logStore.server('info', 'plugin_stopping');
     state.ticketStore.close();
+    state.openaiBridge.close();
     try {
+        await state.bridgeListener?.close();
         await state.loopbackTransport.close();
         state.logStore.server('info', 'plugin_stopped');
     } catch (error) {

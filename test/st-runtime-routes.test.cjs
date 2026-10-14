@@ -135,6 +135,50 @@ test('explicit Vertex Express and Full secrets use the selected host secret only
         { key: 'vertex-key', id: 'express-selected' },
         { key: 'vertex-sa', id: 'full-selected' },
     ]);
+    const bridgeRequest = { user: { directories: { root: 'user' } } };
+    const selected = runtime.resolveOpenAIConnection(bridgeRequest, {
+        source: 'vertexai', model: 'gemini-2.5-flash', authMode: 'full', region: 'global', secretId: 'full-selected',
+    });
+    assert.equal(selected.credentialSnapshot, undefined);
+    assert.equal(selected.logCredential, JSON.stringify(selectedServiceAccount));
+    for (const authenticate of [false, true]) {
+        const config = await runtime.getOpenAIConfig(bridgeRequest, selected.connection, authenticate);
+        assert.equal(config.logCredential, JSON.stringify(selectedServiceAccount));
+        assert.equal(Boolean(config.headers), authenticate);
+    }
+});
+
+test('bridge pins active IDs when exposed and snapshots credentials on older hosts', async () => {
+    let active = 'first';
+    const runtime = await loadStRuntime({
+        readFile: async () => JSON.stringify({ name: 'sillytavern', version: '1.18.0' }),
+        importModule: async specifier => specifier.endsWith('/secrets.js') ? {
+            SECRET_KEYS: { MAKERSUITE: 'api_key_makersuite', VERTEXAI_SERVICE_ACCOUNT: 'vertexai_service_account_json' },
+            readSecretState: () => ({ api_key_makersuite: [{ id: active, active: true }] }),
+            readSecret: (_directories, _key, id) => id ? `credential-${id}` : `credential-${active}`,
+        } : { getGoogleApiConfig: async () => { throw new Error('Native API must not be called'); } },
+    });
+    const request = { user: { directories: { root: 'alice' } } };
+    const selected = runtime.resolveOpenAIConnection(request, { source: 'makersuite', model: 'gemini-2.5-flash' });
+    assert.equal(selected.connection.secretId, 'first');
+    assert.equal(selected.logCredential, 'credential-first');
+    active = 'second';
+    assert.equal((await runtime.getOpenAIConfig(request, selected.connection)).headers.Authorization, 'Bearer credential-first');
+    assert.equal((await runtime.getOpenAIConfig(request, selected.connection)).logCredential, 'credential-first');
+    assert.equal(selected.credentialSnapshot, undefined);
+
+    const oldRuntime = await loadStRuntime({
+        readFile: async () => JSON.stringify({ name: 'sillytavern', version: '1.18.0' }),
+        importModule: async specifier => specifier.endsWith('/secrets.js') ? {
+            SECRET_KEYS: { MAKERSUITE: 'api_key_makersuite' },
+            readSecretState: () => ({ api_key_makersuite: true }),
+            readSecret: () => `credential-${active}`,
+        } : { getGoogleApiConfig: async () => { throw new Error('Native API must not be called'); } },
+    });
+    const snapshot = oldRuntime.resolveOpenAIConnection(request, { source: 'makersuite', model: 'gemini-2.5-flash' });
+    assert.equal((await oldRuntime.getOpenAIConfig(request, snapshot.connection, true, snapshot.credentialSnapshot)).headers.Authorization, 'Bearer credential-second');
+    active = 'third';
+    await assert.rejects(oldRuntime.getOpenAIConfig(request, snapshot.connection, true, snapshot.credentialSnapshot), { code: 'GOOGLE_CONNECTION_CHANGED' });
 });
 
 test('route registration exposes handshake, prepare, and fail-closed sink', () => {
@@ -166,9 +210,9 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
     assert.equal(response.body.ok, true);
     assert.equal(response.body.protocolVersion, 2);
     assert.equal(response.body.transport, 'loopback-http');
-    assert.equal(response.body.pluginVersion, '0.4.0');
+    assert.equal(response.body.pluginVersion, '0.5.0');
     assert.equal(response.body.sillyTavern.compatibleRange, '>=1.16.0');
-    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true });
+    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true, openaiBridge: false, openaiBridgeDebug: false, openaiBridgeLogs: false, openaiBridgeGateway: false, openaiBridgePersistence: false });
     assert.equal(Object.hasOwn(response.body, 'port'), false);
     assert.deepEqual(logEvents, []);
 
@@ -181,5 +225,97 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
     assert.equal(nonAdminResponse.body.capabilities.logs, false);
     assert.equal(nonAdminResponse.body.capabilities.clientLogging, false);
     assert.equal(nonAdminResponse.body.capabilities.usage, true);
+    assert.equal(nonAdminResponse.body.capabilities.openaiBridge, false);
     assert.deepEqual(logEvents, []);
+});
+
+test('health advertises the bridge only when its management routes are installed', () => {
+    const handlers = new Map();
+    const router = { get(path, handler) { handlers.set(`GET ${path}`, handler); }, post(path, handler) { handlers.set(`POST ${path}`, handler); }, use() {} };
+    const openaiBridge = { get() {}, update() {}, persistenceEnabled: true };
+    registerRoutes(router, { stRuntime: { stVersion: '1.18.0' }, openaiBridge });
+    assert.equal(typeof handlers.get('GET /openai-bridge'), 'function');
+    assert.equal(typeof handlers.get('POST /openai-bridge'), 'function');
+    const response = { set() { return this; }, json(value) { this.body = value; return this; } };
+    handlers.get('GET /health')({ user: {} }, response);
+    assert.equal(response.body.capabilities.openaiBridge, true);
+    assert.equal(response.body.capabilities.openaiBridgeDebug, true);
+    assert.equal(response.body.capabilities.openaiBridgeLogs, true);
+    assert.equal(response.body.capabilities.openaiBridgeGateway, true);
+    assert.equal(response.body.capabilities.openaiBridgePersistence, true);
+});
+test('Luker follows its authoritative settings repository using only the trusted owner handle', async () => {
+    for (const method of ['get', 'load']) {
+        const owners = []; const saved = { main_api: 'openai' }; let broken = false;
+        const runtime = await loadStRuntime({ rootDir: 'C:\\fake-luker', readFile: async () => JSON.stringify({ name: 'luker', version: '2.7.0' }), fileExists: () => true,
+            importModule: async specifier => specifier.endsWith('/storage/index.js') ? { getSettingsRepo: () => ({ [method]: async handle => { owners.push(handle); if (broken) throw new Error('Database secret'); return saved; } }) }
+                : specifier.endsWith('/secrets.js') ? { SECRET_KEYS: { MAKERSUITE: 'key' }, readSecret: () => '' } : { getGoogleApiConfig: async () => ({}) },
+        });
+        assert.equal(await runtime.readSavedSettings('alice'), saved); assert.deepEqual(owners, ['alice']);
+        await assert.rejects(runtime.readSavedSettings(undefined), { code: 'BRIDGE_FOLLOW_SETTINGS_UNAVAILABLE' }); assert.deepEqual(owners, ['alice']);
+        broken = true;
+        await assert.rejects(runtime.readSavedSettings('alice'), cause => cause.code === 'BRIDGE_FOLLOW_SETTINGS_UNAVAILABLE' && !cause.message.includes('Database secret'));
+    }
+});
+test('only absent Luker storage or SillyTavern uses file follow; existing broken storage stays authoritative', async () => {
+    for (const [name, exists, broken] of [['luker', false, false], ['sillytavern', true, false], ['luker', true, true]]) {
+        let storageImports = 0;
+        const runtime = await loadStRuntime({ readFile: async () => JSON.stringify({ name, version: name === 'luker' ? '2.7.0' : '1.18.0' }), fileExists: () => exists,
+            importModule: async specifier => {
+                if (specifier.endsWith('/storage/index.js')) { storageImports++; throw new Error('Storage dependency unavailable'); }
+                return specifier.endsWith('/secrets.js') ? { SECRET_KEYS: { MAKERSUITE: 'key' }, readSecret: () => '' } : { getGoogleApiConfig: async () => ({}) };
+            },
+        });
+        assert.equal(typeof runtime.readSavedSettings === 'function', broken);
+        assert.equal(storageImports, broken ? 1 : 0);
+        if (broken) await assert.rejects(runtime.readSavedSettings('alice'), { code: 'BRIDGE_FOLLOW_SETTINGS_UNAVAILABLE' });
+    }
+});
+
+test('bridge startup enumerates trusted enabled accounts and supports account-free hosts', async () => {
+    for (const name of ['sillytavern', 'luker']) {
+        for (const accountsEnabled of [true, false]) {
+            const requested = []; let registryReads = 0;
+            const runtime = await loadStRuntime({ rootDir: 'C:/fake-host',
+                readFile: async () => JSON.stringify({ name, version: '2.7.0' }), fileExists: () => false,
+                importModule: async specifier => {
+                    if (specifier.endsWith('/users.js')) return {
+                        getAllEnabledUsers: async () => { registryReads++; return [{ handle: 'alice', enabled: true }, { handle: 'disabled', enabled: false }]; },
+                        getUserDirectories: handle => { requested.push(handle); return { root: require('node:path').resolve('data', handle), secrets: handle + '/secrets.json' }; },
+                    };
+                    if (specifier.endsWith('/util.js')) return { getConfigValue(key, fallback, type) { assert.equal(key, 'enableUserAccounts'); assert.equal(type, 'boolean'); return accountsEnabled; } };
+                    if (specifier.endsWith('/constants.js')) return { DEFAULT_USER: { handle: 'default-user', enabled: true, unrelatedPrivateField: 'not copied' } };
+                    if (specifier.endsWith('/secrets.js')) return { SECRET_KEYS: {}, readSecret: () => '' };
+                    return { getGoogleApiConfig: async () => ({}) };
+                },
+            });
+            const owners = await runtime.listBridgeUsers();
+            const handle = accountsEnabled ? 'alice' : 'default-user';
+            assert.deepEqual(requested, [handle]); assert.equal(registryReads, accountsEnabled ? 1 : 0);
+            assert.deepEqual(owners, [{ user: { directories: { root: require('node:path').resolve('data', handle), secrets: handle + '/secrets.json' }, profile: { handle } } }]);
+        }
+    }
+});
+
+test('bridge user enumeration never falls back to a different user after host registry errors', async () => {
+    for (const failure of ['import', 'registry', 'directory', 'missing-helper']) {
+        const runtime = await loadStRuntime({ rootDir: 'C:/fake-host', fileExists: () => false,
+            readFile: async () => JSON.stringify({ name: 'sillytavern', version: '1.19.0' }),
+            importModule: async specifier => {
+                if (specifier.endsWith('/users.js')) {
+                    if (failure === 'import') throw new Error('private registry diagnostic');
+                    if (failure === 'missing-helper') return {};
+                    return { getAllEnabledUsers: async () => {
+                        if (failure === 'registry') throw new Error('private database diagnostic');
+                        return [{ handle: 'alice', enabled: true }];
+                    }, getUserDirectories: () => ({ root: 'relative/untrusted' }) };
+                }
+                if (specifier.endsWith('/util.js')) return { getConfigValue: () => true };
+                if (specifier.endsWith('/constants.js')) return { DEFAULT_USER: { handle: 'default-user' } };
+                if (specifier.endsWith('/secrets.js')) return { SECRET_KEYS: {}, readSecret: () => '' };
+                return { getGoogleApiConfig: async () => ({}) };
+            },
+        });
+        await assert.rejects(runtime.listBridgeUsers(), error => error.code === 'BRIDGE_USERS_UNAVAILABLE' && !error.message.includes('private'));
+    }
 });
