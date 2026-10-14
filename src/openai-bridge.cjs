@@ -17,6 +17,7 @@ const { PluginError, sendExpressError } = require('./errors.cjs');
 const { discoverModels, validatedTarget } = require('./openai-models.cjs');
 const { buildPayGoHeaders } = require('./header-policy.cjs');
 const { validateBridgePolicy, effectiveBridgeTier } = require('./bridge-tier.cjs');
+const { validateSavedState } = require('./bridge-state-store.cjs');
 
 const MAX_BODY = 16 * 1024 * 1024;
 const FORBIDDEN = /^(?:reverse_proxy|custom_url|proxy_password|apiKey|chat_completion_source|secret_id|secretId|authorization|headers|url|base_url)$/iu;
@@ -76,13 +77,58 @@ function userId(request) {
     return createHash('sha256').update(root).digest('hex');
 }
 
-function createOpenAIBridge({ stRuntime, upstreamRequest = https.request, maxBodyBytes = MAX_BODY, timeoutMs, maxGlobal = 16, maxPerUser = 4, bridgeLogStore } = {}) {
+function createOpenAIBridge({ stRuntime, upstreamRequest = https.request, maxBodyBytes = MAX_BODY, timeoutMs, maxGlobal = 16, maxPerUser = 4, bridgeLogStore, stateStore } = {}) {
     const states = new Map();
     const keys = new Map();
     const active = new Set();
     const revisions = new Map();
+    const commits = new Map();
+    const restoreFailures = new Map();
     let closed = false;
     let baseUrl = null;
+
+    function savedState(state) {
+        if (!state) return { schema: 1, enabled: false };
+        let credentialFingerprint;
+        if (!state.connection.secretId) {
+            if (typeof state.credentialSnapshot !== 'string' || !state.credentialSnapshot) throw new PluginError(409, 'BRIDGE_CREDENTIAL_BINDING_REQUIRED', 'The bridge credential could not be bound for restart.');
+            credentialFingerprint = createHash('sha256').update(state.credentialSnapshot).digest('hex');
+        }
+        return { schema: 1, enabled: true, key: state.key, connection: state.connection,
+            ...(credentialFingerprint ? { credentialFingerprint } : {}), mode: state.mode, tierSource: state.tierSource,
+            tier: state.tier, debugLocalAccess: state.debugLocalAccess };
+    }
+    async function commit(id, revision, directories, state, persist = true) {
+        const prior = commits.get(id) || Promise.resolve();
+        const next = prior.catch(() => {}).then(async () => {
+            const check = () => { if (closed || revisions.get(id) !== revision) throw new PluginError(409, 'BRIDGE_UPDATE_SUPERSEDED', 'A newer bridge update replaced this request.'); };
+            check();
+            const previous = states.get(id);
+            if (state && keys.has(state.key) && keys.get(state.key) !== previous) throw new PluginError(409, 'BRIDGE_KEY_CONFLICT', 'The saved bridge key is already in use. Rotate the bridge key.');
+            if (stateStore && persist) {
+                let original;
+                try { original = await stateStore.read(directories); }
+                catch (cause) { if (cause.code !== 'BRIDGE_STATE_INVALID') throw cause; }
+                // Explicit management may repair malformed state, but otherwise
+                // rollback preserves disk even after a failed startup restore.
+                original ??= { schema: 1, enabled: false };
+                check();
+                await stateStore.write(directories, savedState(state));
+                if (closed || revisions.get(id) !== revision) {
+                    // No later commit can write until this rollback finishes.
+                    await stateStore.write(directories, original);
+                    check();
+                }
+            }
+            check();
+            revoke(previous);
+            if (state) { states.set(id, state); keys.set(state.key, state); }
+            else states.delete(id);
+            restoreFailures.delete(id);
+        });
+        commits.set(id, next);
+        try { await next; } finally { if (commits.get(id) === next) commits.delete(id); }
+    }
 
     function view(state) {
         return { ok: true, enabled: Boolean(state), debugLocalAccess: Boolean(state?.debugLocalAccess), baseUrl: state ? `${baseUrl}/openai/v1` : null, apiKey: state?.key ?? null, model: 'st-current', connection: state?.connection ?? null };
@@ -354,8 +400,48 @@ function createOpenAIBridge({ stRuntime, upstreamRequest = https.request, maxBod
     }
     return {
         setBaseUrl(value) { baseUrl = value; },
+        persistenceEnabled: Boolean(stateStore),
         route,
-        get(request, response) { try { response.set?.('Cache-Control', 'no-store'); const state = states.get(userId(request)); return state?.connection.source === 'vertexai' ? policyView(state).then(value => response.json(value), cause => sendExpressError(response, cause)) : response.json(view(state)); } catch (cause) { return sendExpressError(response, cause); } },
+        async restore(users, onError = () => {}) {
+            if (!stateStore || !baseUrl || closed) return;
+            await Promise.all(users.map(async request => {
+                let id; let revision;
+                try {
+                    id = userId(request);
+                    revision = (revisions.get(id) || 0) + 1;
+                    revisions.set(id, revision);
+                    const saved = await stateStore.read(request.user.directories);
+                    if (!saved) return;
+                    validateSavedState(saved);
+                    if (!saved.enabled) return;
+                    const connection = validateConnection(saved.connection);
+                    const directories = { ...request.user.directories };
+                    const resolved = stRuntime.resolveOpenAIConnection({ user: { directories } }, connection);
+                    if (connection.secretId && resolved.connection.secretId !== connection.secretId) throw new PluginError(409, 'BRIDGE_CREDENTIAL_CHANGED', 'The bound bridge credential is unavailable.');
+                    if (!connection.secretId && (resolved.connection.secretId || typeof resolved.credentialSnapshot !== 'string'
+                        || createHash('sha256').update(resolved.credentialSnapshot).digest('hex') !== saved.credentialFingerprint))
+                        throw new PluginError(409, 'BRIDGE_CREDENTIAL_CHANGED', 'The bound bridge credential changed. Configure the bridge again.');
+                    const policy = validateBridgePolicy(saved, null, connection);
+                    const checked = await stRuntime.getOpenAIConfig({ user: { directories } }, connection, false, resolved.credentialSnapshot);
+                    const state = { key: saved.key, connection, directories, ...policy, debugLocalAccess: saved.debugLocalAccess,
+                        credentialSnapshot: resolved.credentialSnapshot, ownerHandle: request.user.profile?.handle,
+                        logSecrets: [...credentialValues(resolved.logCredential), ...credentialValues(resolved.credentialSnapshot), ...credentialValues(checked?.logCredential)] };
+                    await commit(id, revision, directories, state, false);
+                } catch (cause) {
+                    const code = cause instanceof PluginError ? cause.code : 'BRIDGE_RESTORE_FAILED';
+                    if (id && !closed && revisions.get(id) === revision) restoreFailures.set(id, 'The saved bridge configuration could not be restored. Configure it again or disable it to clear its startup setting.');
+                    onError({ code });
+                }
+            }));
+        },
+        get(request, response) { try {
+            response.set?.('Cache-Control', 'no-store'); const id = userId(request); const state = states.get(id);
+            const result = value => {
+                if (states.get(id) !== state) return response.json(view(states.get(id)));
+                return response.json(restoreFailures.has(id) ? { ...value, restorePending: true, restoreError: restoreFailures.get(id) } : value);
+            };
+            return state?.connection.source === 'vertexai' ? policyView(state).then(result, cause => sendExpressError(response, cause)) : result(view(state));
+        } catch (cause) { return sendExpressError(response, cause); } },
         async getLogs(request, response) {
             try { userId(request); response.set?.('Cache-Control', 'no-store'); if (!bridgeLogStore) throw new PluginError(503, 'BRIDGE_LOGS_UNAVAILABLE', 'Bridge logs are unavailable.'); return response.json({ ok: true, entries: await bridgeLogStore.read(request.user.directories) }); } catch (cause) { return sendExpressError(response, cause); }
         },
@@ -371,7 +457,7 @@ function createOpenAIBridge({ stRuntime, upstreamRequest = https.request, maxBod
                 const body = request.body;
                 if (!body || typeof body !== 'object' || Array.isArray(body) || typeof body.enabled !== 'boolean' || Object.keys(body).some(key => !['enabled', 'connection', 'rotateKey', 'debugLocalAccess', 'mode', 'tierSource', 'tier'].includes(key)) || (body.rotateKey !== undefined && typeof body.rotateKey !== 'boolean') || (body.debugLocalAccess !== undefined && typeof body.debugLocalAccess !== 'boolean')) throw new PluginError(400, 'INVALID_BRIDGE_CONFIG', 'The bridge configuration is invalid.');
                 const previous = states.get(id);
-                if (!body.enabled) { revoke(previous); states.delete(id); return response.json(view(null)); }
+                if (!body.enabled) { await commit(id, revision, request.user.directories, null); return response.json(view(null)); }
                 if (!baseUrl) throw new PluginError(503, 'BRIDGE_LISTENER_UNAVAILABLE', 'The bridge listener is unavailable. Check whether its fixed port is occupied and verify the listener configuration.');
                 let connection = body.connection === undefined ? previous?.connection : validateConnection(body.connection);
                 if (!connection) throw new PluginError(400, 'INVALID_CONNECTION', 'A Google connection is required.');
@@ -384,13 +470,14 @@ function createOpenAIBridge({ stRuntime, upstreamRequest = https.request, maxBod
                 const checkedConfig = await stRuntime.getOpenAIConfig({ user: { directories } }, connection, false, resolved.credentialSnapshot);
                 if (closed || revisions.get(id) !== revision) throw new PluginError(409, 'BRIDGE_UPDATE_SUPERSEDED', 'A newer bridge update replaced this request.');
                 const key = previous && !body.rotateKey ? previous.key : randomBytes(32).toString('base64url');
-                if (previous) revoke(previous);
                 const state = { key, connection, directories, logSecrets: [...credentialValues(resolved.logCredential), ...credentialValues(resolved.credentialSnapshot), ...credentialValues(checkedConfig?.logCredential), checkedConfig?.headers?.Authorization, checkedConfig?.headers?.Authorization?.replace(/^Bearer /u, '')], credentialSnapshot: resolved.credentialSnapshot, debugLocalAccess: body.debugLocalAccess ?? previous?.debugLocalAccess ?? false };
                 Object.assign(state, policy);
                 state.ownerHandle = typeof request.user?.profile?.handle === 'string' ? request.user.profile.handle : previous?.ownerHandle;
-                states.set(id, state); keys.set(key, state);
+                await commit(id, revision, directories, state);
                 response.set?.('Cache-Control', 'no-store');
-                return response.json(await policyView(state));
+                const result = await policyView(state);
+                if (closed || revisions.get(id) !== revision || states.get(id) !== state) throw new PluginError(409, 'BRIDGE_UPDATE_SUPERSEDED', 'A newer bridge update replaced this request.');
+                return response.json(result);
             } catch (cause) { return sendExpressError(response, cause); }
         },
         close() { closed = true; for (const state of states.values()) revoke(state); states.clear(); keys.clear(); },

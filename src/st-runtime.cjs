@@ -248,6 +248,36 @@ async function loadStRuntime({
         }
     };
 
+    const listBridgeUsers = async () => {
+        try {
+            // Use the host account registry, never directories stored in a bridge
+            // configuration. Account-free ST installations return no enabled users.
+            const [users, util, constants] = await Promise.all([
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'users.js')).href),
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'util.js')).href),
+                importModule(pathToFileURL(path.join(resolvedRoot, 'src', 'constants.js')).href),
+            ]);
+            if (typeof users.getAllEnabledUsers !== 'function' || typeof users.getUserDirectories !== 'function'
+                || typeof util.getConfigValue !== 'function') throw new Error('Missing host user registry');
+            const accountsEnabled = util.getConfigValue('enableUserAccounts', false, 'boolean');
+            if (typeof accountsEnabled !== 'boolean') throw new Error('Invalid account configuration');
+            const profiles = accountsEnabled ? await users.getAllEnabledUsers() : [constants.DEFAULT_USER];
+            if (!Array.isArray(profiles)) throw new Error('Invalid user registry');
+            const handles = new Set();
+            return profiles.filter(profile => !accountsEnabled || profile?.enabled === true).map(profile => {
+                const handle = profile?.handle;
+                if (typeof handle !== 'string' || !handle || handle.length > 256 || /[\x00-\x1f\x7f]/u.test(handle)
+                    || handles.has(handle)) throw new Error('Invalid user handle');
+                handles.add(handle);
+                const directories = users.getUserDirectories(handle);
+                if (typeof directories?.root !== 'string' || !path.isAbsolute(directories.root)) throw new Error('Invalid user directory');
+                return { user: { directories: { ...directories }, profile: { handle } } };
+            });
+        } catch {
+            throw new PluginError(503, 'BRIDGE_USERS_UNAVAILABLE', 'The host user registry is unavailable for bridge restoration.');
+        }
+    };
+
     return Object.freeze({
         rootDir: resolvedRoot,
         hostName: packageData.name,
@@ -255,6 +285,7 @@ async function loadStRuntime({
         getGoogleApiConfig,
         getOpenAIConfig,
         resolveOpenAIConnection,
+        listBridgeUsers,
         ...(readSavedSettings ? { readSavedSettings } : {}),
     });
 }

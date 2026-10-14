@@ -41,6 +41,7 @@ function registerRoutes(router, dependencies) {
                 openaiBridgeDebug: Boolean(dependencies.openaiBridge),
                 openaiBridgeLogs: Boolean(dependencies.openaiBridge),
                 openaiBridgeGateway: Boolean(dependencies.openaiBridge),
+                openaiBridgePersistence: Boolean(dependencies.openaiBridge?.persistenceEnabled),
             },
         });
     });

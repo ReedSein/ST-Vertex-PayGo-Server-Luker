@@ -212,7 +212,7 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
     assert.equal(response.body.transport, 'loopback-http');
     assert.equal(response.body.pluginVersion, '0.4.0');
     assert.equal(response.body.sillyTavern.compatibleRange, '>=1.16.0');
-    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true, openaiBridge: false, openaiBridgeDebug: false, openaiBridgeLogs: false, openaiBridgeGateway: false });
+    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true, openaiBridge: false, openaiBridgeDebug: false, openaiBridgeLogs: false, openaiBridgeGateway: false, openaiBridgePersistence: false });
     assert.equal(Object.hasOwn(response.body, 'port'), false);
     assert.deepEqual(logEvents, []);
 
@@ -232,7 +232,7 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
 test('health advertises the bridge only when its management routes are installed', () => {
     const handlers = new Map();
     const router = { get(path, handler) { handlers.set(`GET ${path}`, handler); }, post(path, handler) { handlers.set(`POST ${path}`, handler); }, use() {} };
-    const openaiBridge = { get() {}, update() {} };
+    const openaiBridge = { get() {}, update() {}, persistenceEnabled: true };
     registerRoutes(router, { stRuntime: { stVersion: '1.18.0' }, openaiBridge });
     assert.equal(typeof handlers.get('GET /openai-bridge'), 'function');
     assert.equal(typeof handlers.get('POST /openai-bridge'), 'function');
@@ -242,6 +242,7 @@ test('health advertises the bridge only when its management routes are installed
     assert.equal(response.body.capabilities.openaiBridgeDebug, true);
     assert.equal(response.body.capabilities.openaiBridgeLogs, true);
     assert.equal(response.body.capabilities.openaiBridgeGateway, true);
+    assert.equal(response.body.capabilities.openaiBridgePersistence, true);
 });
 test('Luker follows its authoritative settings repository using only the trusted owner handle', async () => {
     for (const method of ['get', 'load']) {
@@ -268,5 +269,53 @@ test('only absent Luker storage or SillyTavern uses file follow; existing broken
         assert.equal(typeof runtime.readSavedSettings === 'function', broken);
         assert.equal(storageImports, broken ? 1 : 0);
         if (broken) await assert.rejects(runtime.readSavedSettings('alice'), { code: 'BRIDGE_FOLLOW_SETTINGS_UNAVAILABLE' });
+    }
+});
+
+test('bridge startup enumerates trusted enabled accounts and supports account-free hosts', async () => {
+    for (const name of ['sillytavern', 'luker']) {
+        for (const accountsEnabled of [true, false]) {
+            const requested = []; let registryReads = 0;
+            const runtime = await loadStRuntime({ rootDir: 'C:/fake-host',
+                readFile: async () => JSON.stringify({ name, version: '2.7.0' }), fileExists: () => false,
+                importModule: async specifier => {
+                    if (specifier.endsWith('/users.js')) return {
+                        getAllEnabledUsers: async () => { registryReads++; return [{ handle: 'alice', enabled: true }, { handle: 'disabled', enabled: false }]; },
+                        getUserDirectories: handle => { requested.push(handle); return { root: require('node:path').resolve('data', handle), secrets: handle + '/secrets.json' }; },
+                    };
+                    if (specifier.endsWith('/util.js')) return { getConfigValue(key, fallback, type) { assert.equal(key, 'enableUserAccounts'); assert.equal(type, 'boolean'); return accountsEnabled; } };
+                    if (specifier.endsWith('/constants.js')) return { DEFAULT_USER: { handle: 'default-user', enabled: true, unrelatedPrivateField: 'not copied' } };
+                    if (specifier.endsWith('/secrets.js')) return { SECRET_KEYS: {}, readSecret: () => '' };
+                    return { getGoogleApiConfig: async () => ({}) };
+                },
+            });
+            const owners = await runtime.listBridgeUsers();
+            const handle = accountsEnabled ? 'alice' : 'default-user';
+            assert.deepEqual(requested, [handle]); assert.equal(registryReads, accountsEnabled ? 1 : 0);
+            assert.deepEqual(owners, [{ user: { directories: { root: require('node:path').resolve('data', handle), secrets: handle + '/secrets.json' }, profile: { handle } } }]);
+        }
+    }
+});
+
+test('bridge user enumeration never falls back to a different user after host registry errors', async () => {
+    for (const failure of ['import', 'registry', 'directory', 'missing-helper']) {
+        const runtime = await loadStRuntime({ rootDir: 'C:/fake-host', fileExists: () => false,
+            readFile: async () => JSON.stringify({ name: 'sillytavern', version: '1.19.0' }),
+            importModule: async specifier => {
+                if (specifier.endsWith('/users.js')) {
+                    if (failure === 'import') throw new Error('private registry diagnostic');
+                    if (failure === 'missing-helper') return {};
+                    return { getAllEnabledUsers: async () => {
+                        if (failure === 'registry') throw new Error('private database diagnostic');
+                        return [{ handle: 'alice', enabled: true }];
+                    }, getUserDirectories: () => ({ root: 'relative/untrusted' }) };
+                }
+                if (specifier.endsWith('/util.js')) return { getConfigValue: () => true };
+                if (specifier.endsWith('/constants.js')) return { DEFAULT_USER: { handle: 'default-user' } };
+                if (specifier.endsWith('/secrets.js')) return { SECRET_KEYS: {}, readSecret: () => '' };
+                return { getGoogleApiConfig: async () => ({}) };
+            },
+        });
+        await assert.rejects(runtime.listBridgeUsers(), error => error.code === 'BRIDGE_USERS_UNAVAILABLE' && !error.message.includes('private'));
     }
 });
