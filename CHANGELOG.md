@@ -1,5 +1,13 @@
 # 更新日志
 
+## 未发布 · 面板内配套更新
+
+- 前端面板新增管理员专用的组件更新入口：检查两个组件、把同一配套 tag 应用到前后端、替换前备份、失败回滚，效果与命令行的更新入口一致。
+- 更新在宿主运行中完成，不依赖系统 Git 与 npm：isomorphic-git 以打包产物入库，用户仍不需要安装任何依赖；`npm run vendor:check` 会在产物与固定版本不一致时失败。
+- 版本规则沿用安装器：`main` 追随最近可达 tag、其他分支追随自身提交、同一提交多 tag 按版本决胜、已装版本领先时不降级、本地修改与本地提交默认阻止、组件被阻塞则整体不更新。
+- 新增三条管理员接口 `GET/POST /api/plugins/vertex-paygo/update` 与 `GET /api/plugins/vertex-paygo/update/status`，并在 `/health` 的 `capabilities` 中增加 `updater` 字段。规则与恢复边界见 [docs/in-app-updates.md](docs/in-app-updates.md)。
+- 宿主的 `enableServerPluginsAutoUpdate` 与 Luker 自带的扩展更新按钮不受影响，也不会被本功能修改；固定版本的用户需自行关闭宿主自动更新。
+
 ## 2026-10-14 · 0.5.0 Google OpenAI 兼容桥接
 
 - 发布前后端配套 0.5.0（沿用预发布渠道）；从仅内存保存的旧版桥接升级后需首次手动启用，已有持久化配置继续使用，之后按保存状态自动恢复。桥接仅支持 SillyTavern/Luker，不支持 TauriTavern。

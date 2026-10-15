@@ -17,6 +17,11 @@ const {
 const { createClientLogHandler, createReadLogsHandler } = require('./log-routes.cjs');
 const { createPrepareHandler } = require('./prepare-route.cjs');
 const { createUsageHandler } = require('./usage-route.cjs');
+const {
+    createCheckUpdateHandler,
+    createStartUpdateHandler,
+    createUpdateStatusHandler,
+} = require('./updater/routes.cjs');
 
 function registerRoutes(router, dependencies) {
     router.get('/health', (request, response) => {
@@ -37,6 +42,9 @@ function registerRoutes(router, dependencies) {
                 logs: isAdmin,
                 clientLogging: isAdmin,
                 usage: true,
+                // Absent means the backend predates the panel updater; false
+                // means the caller is not an administrator.
+                updater: isAdmin && Boolean(dependencies.updater),
                 openaiBridge: Boolean(dependencies.openaiBridge),
                 openaiBridgeDebug: Boolean(dependencies.openaiBridge),
                 openaiBridgeLogs: Boolean(dependencies.openaiBridge),
@@ -47,8 +55,11 @@ function registerRoutes(router, dependencies) {
     });
     router.get('/logs', createReadLogsHandler(dependencies));
     router.get('/usage', createUsageHandler(dependencies));
+    router.get('/update', createCheckUpdateHandler(dependencies));
+    router.get('/update/status', createUpdateStatusHandler(dependencies));
     router.post('/logs/client', createClientLogHandler(dependencies));
     router.post('/prepare', createPrepareHandler(dependencies));
+    router.post('/update', createStartUpdateHandler(dependencies));
     if (dependencies.openaiBridge) {
         router.get('/openai-bridge', (request, response) => dependencies.openaiBridge.get(request, response));
         router.post('/openai-bridge', (request, response) => dependencies.openaiBridge.update(request, response));

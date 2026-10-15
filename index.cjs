@@ -16,6 +16,7 @@ const { BridgeStateStore } = require('./src/bridge-state-store.cjs');
 const { LogStore, describeError } = require('./src/log-store.cjs');
 const { PLUGIN_ID } = require('./src/protocol.cjs');
 const { registerRoutes } = require('./src/routes.cjs');
+const { createUpdater } = require('./src/updater/index.cjs');
 const { loadStRuntime } = require('./src/st-runtime.cjs');
 const { TicketStore } = require('./src/ticket-store.cjs');
 const { UsageStore } = require('./src/usage-store.cjs');
@@ -38,6 +39,9 @@ async function init(router) {
     let openaiBridge;
     let bridgeListener;
     const usageStore = new UsageStore();
+    // Constructing the updater touches nothing: paths and repositories are
+    // resolved when an administrator asks for a check.
+    const updater = createUpdater({ logStore });
     try {
         const stRuntime = await loadStRuntime();
         logStore.server('info', 'host_runtime_loaded', {
@@ -62,7 +66,7 @@ async function init(router) {
             logStore.server('error', 'bridge_listener_failed', describeError(error));
             console.warn(`[Vertex PayGo] ${error.code}: ${error.message}`);
         }
-        registerRoutes(router, { stRuntime, ticketStore, loopbackTransport, logStore, usageStore, openaiBridge });
+        registerRoutes(router, { stRuntime, ticketStore, loopbackTransport, logStore, usageStore, openaiBridge, updater });
         activeState = { ticketStore, loopbackTransport, logStore, usageStore, openaiBridge, bridgeListener };
         logStore.server('info', 'plugin_ready', {
             hostName: stRuntime.hostName,

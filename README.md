@@ -271,6 +271,22 @@ Google AI Studio 的 Standard 与 Flex 模式复用相同的预检机制、鉴�
 
 ---
 
+## 面板内配套更新
+
+前端扩展面板可由管理员检查并执行前后端配套更新，效果与命令行更新入口一致：同一配套 tag、保留各自跟踪分支、保护本地修改、先下载校验再备份替换、不自动降级。不需要系统 Git、不需要 npm、不需要停宿主；替换后需重启宿主才能加载新版本，面板会明确提示这一点。
+
+| 方法 | 路径 | 用途 |
+| --- | --- | --- |
+| GET | `/api/plugins/vertex-paygo/update` | 检查两个组件并报告将要发生的变化，不写入任何安装目录 |
+| POST | `/api/plugins/vertex-paygo/update` | 开始更新，立即返回 `202`，替换在后台继续 |
+| GET | `/api/plugins/vertex-paygo/update/status` | 正在运行任务的阶段与上次结果 |
+
+三个接口都要求管理员会话，写操作另由宿主的 CSRF 中间件保护。`/health` 的 `capabilities.updater` 缺省表示后端版本过旧，`false` 表示当前会话不是管理员，`true` 表示面板可用。版本规则、事务与恢复边界见 [docs/in-app-updates.md](docs/in-app-updates.md)。
+
+宿主的 `enableServerPluginsAutoUpdate` 与 Luker 自带的扩展更新按钮是另外两条通道，本功能不修改它们；需要固定版本的用户应自行关闭宿主自动更新，否则宿主启动时可能把插件拉离配套 tag。
+
+---
+
 ## 本地测试
 
 进行二次开发或校验当前环境的兼容性时，可在插件根目录下运行内置测试套件：

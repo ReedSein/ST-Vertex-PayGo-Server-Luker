@@ -197,8 +197,8 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
             server(level, event, context) { logEvents.push({ level, event, context }); },
         },
     });
-    assert.deepEqual(routes.get.map(route => route.path), ['/health', '/logs', '/usage']);
-    assert.deepEqual(routes.post.map(route => route.path), ['/logs/client', '/prepare']);
+    assert.deepEqual(routes.get.map(route => route.path), ['/health', '/logs', '/usage', '/update', '/update/status']);
+    assert.deepEqual(routes.post.map(route => route.path), ['/logs/client', '/prepare', '/update']);
     assert.deepEqual(routes.use.map(route => route.path), ['/rejected']);
 
     const response = {
@@ -212,7 +212,7 @@ test('route registration exposes handshake, prepare, and fail-closed sink', () =
     assert.equal(response.body.transport, 'loopback-http');
     assert.equal(response.body.pluginVersion, '0.5.0');
     assert.equal(response.body.sillyTavern.compatibleRange, '>=1.16.0');
-    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true, openaiBridge: false, openaiBridgeDebug: false, openaiBridgeLogs: false, openaiBridgeGateway: false, openaiBridgePersistence: false });
+    assert.deepEqual(response.body.capabilities, { logs: true, clientLogging: true, usage: true, updater: false, openaiBridge: false, openaiBridgeDebug: false, openaiBridgeLogs: false, openaiBridgeGateway: false, openaiBridgePersistence: false });
     assert.equal(Object.hasOwn(response.body, 'port'), false);
     assert.deepEqual(logEvents, []);
 
