@@ -44,39 +44,54 @@ when an administrator clicks, so nothing polls a remote on its own.
 
 ## Version rules
 
-Identical to `scripts/install.mjs`:
+The policy follows `scripts/install.mjs`:
 
 - The channel comes from `.git/paygo-updater.json` when it exists, otherwise
   from the checked-out branch: `main` follows release tags, any other branch
   follows its own head. A detached HEAD sitting exactly on a release tag is read
   as the `main` tag channel, decided by Git and never by `package.json`.
-- On the tag channel the target is the newest tag reachable from the branch
-  head, which is what `git describe --tags --abbrev=0` selects. Two tags on one
+- On the tag channel the target follows `git describe --tags --abbrev=0`,
+  including its bounded, date-ordered candidate search through merges. Two tags on one
   commit are separated by version, and a release outranks its own prereleases,
   matching `git -c versionsort.suffix=- tag --sort=-version:refname`.
 - A release tag that does not look like `vMAJOR.MINOR.PATCH` is refused instead
   of ordered, because guessing could pick a different release than the CLI.
-- Tracked local changes, commits absent from the remote history, and a selected
+- Tracked changes, new untracked files, commits absent from the remote history, and a selected
   release older than the installed revision all stop the update. An installed
   revision that is ahead of the newest tag is kept, never downgraded.
-- Both components must move together. If either one is blocked the whole update
-  stops, so a host cannot end up running mismatched halves.
+- When both components follow tags, their selected tags must match. If either
+  component is blocked the whole update stops before activation.
+
+Native Git comparison tests cover merge history, candidate limits and same-commit
+tag ordering. They require Git only on the development machine; runtime selection
+uses the bundled JavaScript implementation. Unsupported tag names fail explicitly.
 
 ## What an update does
 
-1. Check both components and clone the target revisions into a staging
+1. Take the installer's lock, check both components and clone the target revisions into a staging
    directory, still without touching an installation.
 2. Verify each prepared copy is the component it claims to be, still has its
    entry point, and contains no symlink.
 3. Write the channel record into the prepared copy.
-4. Take the lock, create the backup and its `restore.json`, then rename each
+4. Recheck the installed revisions, branches, local changes and metadata. If
+   any changed during preparation, stop before replacing either component.
+5. Create the backup and its `restore.json`, then rename each
    target aside and the prepared copy into place.
-5. Write `updater-report.json` into the backup and release the lock.
+6. Write `updater-report.json` into the backup and release the lock.
 
 An error during preparation changes nothing. An error during activation rolls
 back from the backup; if rollback itself fails, the reply names the backup
 directory to recover from by hand. The manual recovery steps documented for the
 installer apply here too, except that the panel never rewrites `config.yaml`.
+
+A forced process stop cannot run rollback. It may leave a mixed pair or a missing
+component, together with `.paygo-install.lock`, staging and the backup's
+`restore.json`. Keep the host stopped, inspect the recorded targets, and restore
+each saved `frontend`/`server` directory to its recorded target; a component with
+no saved directory may not have moved yet. Remove the stale lock only after
+confirming no installer is running and recovery is complete. The interruption
+test kills an isolated process between renames and verifies this manual recovery;
+it does not demonstrate Android APK crash recovery.
 
 ## Boundaries
 

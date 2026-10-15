@@ -11,7 +11,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const { PluginError } = require('../errors.cjs');
-const { inside } = require('./locations.cjs');
+const { resolveWithinHost } = require('./locations.cjs');
 
 // The filesystem half of an update: one lock, one staging directory on the same
 // filesystem as the targets, one timestamped backup with a restore record, and
@@ -69,9 +69,7 @@ function removePath(target) {
 }
 
 function assertManaged(rootDir, target) {
-    if (!inside(rootDir, target) || path.resolve(rootDir) === path.resolve(target)) {
-        throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `Refusing to manage a path outside the host root: ${target}`);
-    }
+    resolveWithinHost(rootDir, target);
 }
 
 // A backup directory holds the previous contents plus the record needed to put
@@ -79,6 +77,7 @@ function assertManaged(rootDir, target) {
 // single-component update does not promise to restore the other one.
 function createBackup(rootDir, entries) {
     const base = path.join(rootDir, BACKUP_ROOT);
+    assertManaged(rootDir, base);
     fs.mkdirSync(base, { recursive: true, mode: 0o700 });
     const stamp = new Date().toISOString().replace(/[:.]/gu, '-');
     const backup = fs.mkdtempSync(path.join(base, `${stamp}-`));
@@ -103,8 +102,12 @@ function createBackup(rootDir, entries) {
 function activate({ rootDir, backup, entries }) {
     const activated = [];
     try {
+        assertManaged(rootDir, backup);
         for (const entry of entries) {
             assertManaged(rootDir, entry.target);
+            assertManaged(rootDir, entry.staged);
+        }
+        for (const entry of entries) {
             fs.mkdirSync(path.dirname(entry.target), { recursive: true });
             const state = { entry, saved: path.join(backup, entry.name), moved: false, activated: false };
             activated.push(state);

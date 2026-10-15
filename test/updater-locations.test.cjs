@@ -158,3 +158,18 @@ test('a host without config.yaml falls back to the documented defaults', () => {
         cleanup(root);
     }
 });
+
+test('component discovery refuses a matching installation reached through a symlink', () => {
+    const root = makeHost();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-outside-'));
+    try {
+        const frontend = path.join(root, 'public/scripts/extensions/third-party/ST-Vertex-PayGo');
+        fs.renameSync(frontend, path.join(outside, 'frontend'));
+        fs.symlinkSync(path.join(outside, 'frontend'), frontend);
+        const directories = resolveDirectories(root, { commandLine: null, config: { values: {}, source: 'absent' } });
+        assert.throws(() => locateComponent('frontend', directories), error => error.code === 'UPDATER_UNSAFE_PATH');
+    } finally {
+        cleanup(root);
+        cleanup(outside);
+    }
+});

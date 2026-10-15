@@ -67,14 +67,30 @@ function compareTags(left, right) {
     if (a.prerelease === b.prerelease) return 0;
     if (a.prerelease === null) return 1;
     if (b.prerelease === null) return -1;
-    return a.prerelease < b.prerelease ? -1 : 1;
+    const leftParts = a.prerelease.match(/\d+|\D+/gu);
+    const rightParts = b.prerelease.match(/\d+|\D+/gu);
+    for (let index = 0; index < Math.min(leftParts.length, rightParts.length); index++) {
+        const x = leftParts[index];
+        const y = rightParts[index];
+        if (x === y) continue;
+        if (/^\d+$/u.test(x) && /^\d+$/u.test(y)) {
+            if (x.startsWith('0') || y.startsWith('0')) {
+                if (x.startsWith('0') !== y.startsWith('0')) return x.startsWith('0') ? -1 : 1;
+                if (x.startsWith(y) || y.startsWith(x)) return y.length - x.length;
+                return x < y ? -1 : 1;
+            }
+            if (BigInt(x) !== BigInt(y)) return BigInt(x) < BigInt(y) ? -1 : 1;
+        }
+        return x < y ? -1 : 1;
+    }
+    return leftParts.length - rightParts.length;
 }
 
-// `branchHistory` is every commit reachable from the branch head, newest first.
-// Git's `describe --tags --abbrev=0` walks the same way, so the first tagged
-// commit encountered is the newest reachable release. Two tags on one commit
-// are resolved by version instead of by enumeration order.
-function selectReleaseTag({ tags, branchHistory }) {
+// Describe uses a date-ordered walk and ranks candidates by uncovered commits.
+// Preserve its bounded search, including stopping when all tag targets have
+// been found: computing full graph distances can select a different commit.
+// Behaviour is checked against native Git in updater-version-policy-git.test.
+function selectReleaseTag({ tags, branchHistory, branchHead = branchHistory?.[0]?.oid }) {
     if (!Array.isArray(branchHistory) || branchHistory.length === 0) {
         fail('UPDATER_NO_HISTORY', 'The selected branch history is required to resolve the newest release tag.');
     }
@@ -84,16 +100,49 @@ function selectReleaseTag({ tags, branchHistory }) {
         if (!byCommit.has(entry.commit)) byCommit.set(entry.commit, []);
         byCommit.get(entry.commit).push(entry.name);
     }
-    if (byCommit.size === 0) {
-        fail('UPDATER_NO_TAG', 'No release tag is available for the selected branch.');
+    if (byCommit.size === 0) fail('UPDATER_NO_TAG', 'No release tag is available for the selected branch.');
+    const graph = new Map(branchHistory.map(entry => [entry.oid, entry]));
+    const queued = new Set([branchHead]);
+    const coverage = new Map();
+    const queue = [branchHead];
+    const candidates = [];
+    let walked = 0;
+    while (queue.length > 0) {
+        if (candidates.length === Math.min(10, byCommit.size)) break;
+        const oid = queue.shift();
+        const entry = graph.get(oid);
+        if (!entry || !Array.isArray(entry.parents)) fail('UPDATER_NO_HISTORY', 'The staged commit graph is incomplete.');
+        const coveredBy = coverage.get(oid) ?? new Set();
+        if (byCommit.has(oid)) {
+            const candidate = { oid, distance: walked };
+            candidates.push(candidate);
+            coveredBy.add(candidate);
+            if (oid === branchHead) break;
+        }
+        for (const candidate of candidates) {
+            if (!coveredBy.has(candidate)) candidate.distance++;
+        }
+        walked++;
+        for (const parent of entry.parents) {
+            if (!graph.has(parent)) fail('UPDATER_NO_HISTORY', 'The staged commit graph is incomplete.');
+            const inherited = coverage.get(parent) ?? new Set();
+            for (const candidate of coveredBy) inherited.add(candidate);
+            coverage.set(parent, inherited);
+            if (!queued.has(parent)) {
+                queued.add(parent);
+                queue.push(parent);
+            }
+        }
+        queue.sort((a, b) => graph.get(b).timestamp - graph.get(a).timestamp);
     }
-    for (const commit of branchHistory) {
-        const names = byCommit.get(commit);
-        if (!names) continue;
-        const name = names.slice().sort(compareTags).at(-1);
-        return Object.freeze({ name, commit });
+    if (candidates.length === 0) fail('UPDATER_NO_REACHABLE_TAG', 'No release tag is reachable from the selected branch.');
+    candidates.sort((a, b) => a.distance - b.distance);
+    const commit = candidates[0].oid;
+    const names = byCommit.get(commit);
+    if (names.some(name => !parseTag(name))) {
+        fail('UPDATER_UNKNOWN_TAG_SHAPE', 'The selected commit has a tag outside the supported vMAJOR.MINOR.PATCH format.');
     }
-    fail('UPDATER_NO_REACHABLE_TAG', 'No release tag is reachable from the selected branch.');
+    return Object.freeze({ name: names.slice().sort(compareTags).at(-1), commit });
 }
 
 function readMetadata(metadata) {
@@ -141,7 +190,7 @@ function inferChannel({ symbolicBranch = null, metadata = undefined, headTags = 
     );
 }
 
-function planUpdate({
+async function planUpdate({
     installedHead,
     installedBranch = null,
     dirtyTrackedCount = 0,
@@ -159,7 +208,7 @@ function planUpdate({
     if (typeof branchHead !== 'string' || branchHead.length === 0) {
         fail('UPDATER_NO_BRANCH_HEAD', 'The selected branch has no head revision.');
     }
-    if (!target || typeof target.name !== 'string' || typeof target.commit !== 'string') {
+    if (!target || typeof target.commit !== 'string' || (channel?.mode === MODE_TAG && typeof target.name !== 'string')) {
         fail('UPDATER_NO_TARGET', 'The updater did not resolve a target release.');
     }
     if (typeof isAncestor !== 'function') {
@@ -172,10 +221,10 @@ function planUpdate({
     if (dirtyTrackedCount > 0 && !forced) {
         fail(
             'UPDATER_LOCAL_CHANGES',
-            `${dirtyTrackedCount} tracked files differ from the installed revision. Back them up and replace with the installer's --replace-modified option instead.`,
+            `${dirtyTrackedCount} files have local changes or are untracked. Back them up and replace with the installer's --replace-modified option instead.`,
         );
     }
-    if (!forced && !isAncestor(installedHead, branchHead)) {
+    if (!forced && !await isAncestor(installedHead, branchHead)) {
         fail(
             'UPDATER_LOCAL_COMMITS',
             'The installed copy contains commits that are not on the selected branch. Use the installer with --replace-modified to back them up and replace them.',
@@ -188,11 +237,12 @@ function planUpdate({
         && stored.mode === channel.mode
         && stored.tag === (channel.mode === MODE_TAG ? target.name : null);
 
-    if (!forced && !isAncestor(installedHead, target.commit)) {
+    if (!forced && !await isAncestor(installedHead, target.commit)) {
         // The installed revision is not behind the tag. On the same tag channel
         // a revision ahead of the newest tag is kept, because the project never
         // downgrades on its own.
-        if (channel.mode === MODE_TAG && sameChannel && isAncestor(target.commit, installedHead)) {
+        const trackingBranch = stored?.branch || installedBranch || channel.branch;
+        if (channel.mode === MODE_TAG && trackingBranch === channel.branch && await isAncestor(target.commit, installedHead)) {
             return Object.freeze({
                 action: ACTION_KEEP_AHEAD,
                 tag: target.name,

@@ -114,7 +114,8 @@ function readHostConfig(rootDir, { requireFrom = createRequire } = {}) {
     try {
         values = parse(fs.readFileSync(configPath, 'utf8'));
     } catch (error) {
-        throw new PluginError(500, 'UPDATER_HOST_CONFIG_INVALID', `config.yaml could not be parsed: ${error?.message ?? error}`, { cause: error });
+        // Parser messages may quote secret values from config.yaml.
+        throw new PluginError(500, 'UPDATER_HOST_CONFIG_INVALID', 'config.yaml could not be parsed.', { cause: error });
     }
     if (values === null || typeof values !== 'object' || Array.isArray(values)) {
         throw new PluginError(500, 'UPDATER_HOST_CONFIG_INVALID', 'config.yaml is not a YAML mapping.');
@@ -171,7 +172,7 @@ function locateComponent(component, directories) {
         for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
             if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
             const candidate = path.join(root, entry.name);
-            if (componentIdentity(component, candidate)) matches.push(candidate);
+            if (componentIdentity(component, candidate)) matches.push(resolveWithinHost(directories.rootDir, candidate));
         }
     }
     return matches.sort();

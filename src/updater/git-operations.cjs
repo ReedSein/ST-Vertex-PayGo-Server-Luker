@@ -74,17 +74,17 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
         let branch = null;
         try {
             branch = (await git.currentBranch({ fs: fsModule, dir: directory, fullname: false, cache: freshCache() })) ?? null;
-        } catch {
-            // A detached HEAD has no branch name; that is exactly the legacy tag
-            // installation the channel inference expects.
-            branch = null;
+        } catch (error) {
+            throw gitFailure('branch read', error);
         }
 
         let dirtyTrackedCount = 0;
         try {
             const rows = await git.statusMatrix({ fs: fsModule, dir: directory, cache: freshCache() });
-            dirtyTrackedCount = rows.filter(([, head1, workdir, stage]) => Number(head1) > 0
-                && (Number(workdir) !== Number(head1) || Number(stage) !== Number(head1))).length;
+            // Keep the response field name for compatibility; also protect new
+            // files, as the installer's status --porcelain does.
+            dirtyTrackedCount = rows.filter(([, head1, workdir, stage]) => Number(workdir) !== Number(head1)
+                || Number(stage) !== Number(head1)).length;
         } catch (error) {
             throw gitFailure('work tree status read', error);
         }
@@ -103,9 +103,11 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
         try {
             const text = fsModule.readFileSync(path.join(directory, '.git', METADATA_FILE), 'utf8');
             const record = JSON.parse(text);
-            return record !== null && typeof record === 'object' && !Array.isArray(record) ? record : null;
-        } catch {
-            return null;
+            if (record === null || typeof record !== 'object' || Array.isArray(record)) throw new Error('Invalid record');
+            return record;
+        } catch (error) {
+            if (error?.code === 'ENOENT') return null;
+            throw new PluginError(409, 'UPDATER_INVALID_METADATA', 'The PayGo updater metadata could not be read as a JSON object.', { cause: error });
         }
     }
 
@@ -121,10 +123,9 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
         try {
             const url = await git.getConfig({ fs: fsModule, dir: directory, path: 'remote.origin.url', cache: freshCache() });
             return typeof url === 'string' && url.length > 0 ? url : null;
-        } catch {
-            // A missing or unreadable remote is reported, not fatal: updates
-            // always come from the official repository.
-            return null;
+        } catch (error) {
+            if (isNotFound(error)) return null;
+            throw gitFailure('remote configuration read', error);
         }
     }
 
@@ -163,18 +164,22 @@ function createGitOperations({ loadBundle = loadVendoredGit, fsModule = fs } = {
         }
         let history;
         try {
-            history = (await git.log({ fs: fsModule, dir: directory, ref, cache: freshCache() })).map(entry => entry.oid);
+            history = (await git.log({ fs: fsModule, dir: directory, ref, cache: freshCache() }))
+                .map(({ oid, commit }) => ({ oid, parents: commit.parent, timestamp: commit.committer.timestamp }));
         } catch (error) {
             throw gitFailure('staged history read', error);
         }
         return Object.freeze({ branchHead, history });
     }
 
-    async function materialize({ directory, oid }) {
+    async function materialize({ directory, oid, branch = null }) {
         const { git } = loadBundle();
         try {
-            // A commit id is not a branch name, so this writes a detached HEAD.
-            await git.checkout({ fs: fsModule, dir: directory, ref: oid, force: true, cache: freshCache() });
+            // Tag channels detach; commit channels keep their tracking branch
+            // so the next check and the command-line installer see that channel.
+            await git.checkout({ fs: fsModule, dir: directory, ref: branch ?? oid, force: true, cache: freshCache() });
+            const checkedOut = await git.resolveRef({ fs: fsModule, dir: directory, ref: 'HEAD', cache: freshCache() });
+            if (checkedOut !== oid) throw new Error('The prepared checkout does not match the selected revision.');
         } catch (error) {
             throw gitFailure('staged checkout', error);
         }

@@ -13,6 +13,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const {
     acquireLock,
@@ -150,5 +151,63 @@ test('targets outside the host root are refused before anything moves', () => {
     } finally {
         removePath(root);
         removePath(outside);
+    }
+});
+
+test('a backup directory symlink cannot redirect writes outside the host', () => {
+    const root = makeRoot();
+    const outside = makeRoot();
+    try {
+        fs.symlinkSync(outside, path.join(root, '.paygo-install-backups'));
+        assert.throws(() => createBackup(root, []), error => error.code === 'UPDATER_UNSAFE_PATH');
+        assert.deepEqual(fs.readdirSync(outside), []);
+    } finally {
+        removePath(root);
+        removePath(outside);
+    }
+});
+
+test('process death between replacements leaves a lock and a usable manual restore record', { skip: process.platform === 'win32' }, () => {
+    const root = makeRoot();
+    try {
+        const staging = createStaging(root);
+        const entries = ['frontend', 'server'].map(name => ({ name,
+            target: path.join(root, 'components', name), staged: path.join(staging, name) }));
+        for (const entry of entries) {
+            write(path.join(entry.target, 'payload'), `old ${entry.name}`);
+            write(path.join(entry.staged, 'payload'), `new ${entry.name}`);
+        }
+        const result = spawnSync(process.execPath, ['-e', `
+            const fs = require('node:fs');
+            const tx = require(process.argv[1]);
+            const { root, entries } = JSON.parse(process.argv[2]);
+            tx.acquireLock(root);
+            const backup = tx.createBackup(root, entries);
+            const rename = fs.renameSync;
+            fs.renameSync = (from, to) => {
+                rename(from, to);
+                if (from === entries[1].target) process.kill(process.pid, 'SIGKILL');
+            };
+            tx.activate({ rootDir: root, backup, entries });
+        `, require.resolve('../src/updater/transaction.cjs'), JSON.stringify({ root, entries })], { timeout: 5000 });
+        assert.equal(result.signal, 'SIGKILL');
+        assert.equal(read(path.join(entries[0].target, 'payload')), 'new frontend');
+        assert.equal(fs.existsSync(entries[1].target), false);
+        assert.throws(() => acquireLock(root), error => error.code === 'UPDATER_BUSY');
+
+        const backups = path.join(root, '.paygo-install-backups');
+        const backup = path.join(backups, fs.readdirSync(backups)[0]);
+        const restore = JSON.parse(read(path.join(backup, 'restore.json')));
+        assert.equal(restore.components.length, 2);
+        for (const entry of restore.components) {
+            const saved = path.join(backup, entry.name);
+            assert.equal(read(path.join(saved, 'payload')), `old ${entry.name}`);
+            removePath(entry.target);
+            fs.renameSync(saved, entry.target);
+        }
+        releaseLock(path.join(root, '.paygo-install.lock'));
+        for (const entry of entries) assert.equal(read(path.join(entry.target, 'payload')), `old ${entry.name}`);
+    } finally {
+        removePath(root);
     }
 });

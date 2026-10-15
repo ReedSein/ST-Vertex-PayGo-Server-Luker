@@ -39,6 +39,10 @@ function rejectsCode(fn, code) {
     assert.throws(fn, error => error?.code === code);
 }
 
+function chain(...oids) {
+    return oids.map((oid, index) => ({ oid, parents: oids.slice(index + 1, index + 2), timestamp: oids.length - index }));
+}
+
 test('release tags compare numerically and a release outranks its prereleases', () => {
     assert.ok(compareTags('v0.5.0', 'v0.4.0') > 0);
     assert.ok(compareTags('v0.4.0', 'v0.5.0') < 0);
@@ -55,14 +59,14 @@ test('the newest reachable tag wins even when an older commit carries a higher t
         { name: 'v0.9.0', commit: 'c1' },
         { name: 'v0.4.0', commit: 'c3' },
     ];
-    assert.deepEqual(selectReleaseTag({ tags, branchHistory: ['c4', 'c3', 'c2', 'c1'] }), {
+    assert.deepEqual(selectReleaseTag({ tags, branchHistory: chain('c4', 'c3', 'c2', 'c1') }), {
         name: 'v0.4.0',
         commit: 'c3',
     });
 });
 
 test('two tags on one commit are resolved by version, not by enumeration order', () => {
-    const history = ['c3', 'c2'];
+    const history = chain('c3', 'c2');
     assert.equal(selectReleaseTag({
         tags: [{ name: 'v0.4.0', commit: 'c3' }, { name: 'v0.4.1', commit: 'c3' }],
         branchHistory: history,
@@ -74,11 +78,11 @@ test('two tags on one commit are resolved by version, not by enumeration order',
 });
 
 test('tag selection fails loudly instead of guessing', () => {
-    rejectsCode(() => selectReleaseTag({ tags: [], branchHistory: ['c1'] }), 'UPDATER_NO_TAG');
+    rejectsCode(() => selectReleaseTag({ tags: [], branchHistory: chain('c1') }), 'UPDATER_NO_TAG');
     rejectsCode(() => selectReleaseTag({ tags: [{ name: 'v1.0.0', commit: 'c1' }], branchHistory: [] }), 'UPDATER_NO_HISTORY');
     rejectsCode(() => selectReleaseTag({
         tags: [{ name: 'v1.0.0', commit: 'elsewhere' }],
-        branchHistory: ['c1', 'c2'],
+        branchHistory: chain('c1', 'c2'),
     }), 'UPDATER_NO_REACHABLE_TAG');
 });
 
@@ -105,8 +109,8 @@ test('unusable channel records fail closed', () => {
     rejectsCode(() => inferChannel({}), 'UPDATER_CHANNEL_UNKNOWN');
 });
 
-test('a clean installation behind the newest tag updates to it', () => {
-    const plan = planUpdate({
+test('a clean installation behind the newest tag updates to it', async () => {
+    const plan = await planUpdate({
         installedHead: 'c1',
         installedBranch: 'main',
         channel: { branch: 'main', mode: 'tag', tag: null },
@@ -120,7 +124,7 @@ test('a clean installation behind the newest tag updates to it', () => {
     assert.equal(plan.commit, 'c3');
 });
 
-test('local changes and local commits block the update unless it is forced', () => {
+test('local changes and local commits block the update unless it is forced', async () => {
     const isAncestor = ancestry(new Map([['c3', 'c2'], ['c2', 'c1']]));
     const base = {
         installedHead: 'c1',
@@ -130,15 +134,15 @@ test('local changes and local commits block the update unless it is forced', () 
         branchHead: 'c3',
         isAncestor,
     };
-    rejectsCode(() => planUpdate({ ...base, dirtyTrackedCount: 2 }), 'UPDATER_LOCAL_CHANGES');
-    rejectsCode(() => planUpdate({ ...base, installedHead: 'local' }), 'UPDATER_LOCAL_COMMITS');
-    assert.equal(planUpdate({ ...base, dirtyTrackedCount: 2, forced: true }).action, ACTION_UPDATE);
-    assert.equal(planUpdate({ ...base, installedHead: 'local', forced: true }).action, ACTION_UPDATE);
+    await assert.rejects(planUpdate({ ...base, dirtyTrackedCount: 2 }), error => error.code === 'UPDATER_LOCAL_CHANGES');
+    await assert.rejects(planUpdate({ ...base, installedHead: 'local' }), error => error.code === 'UPDATER_LOCAL_COMMITS');
+    assert.equal((await planUpdate({ ...base, dirtyTrackedCount: 2, forced: true })).action, ACTION_UPDATE);
+    assert.equal((await planUpdate({ ...base, installedHead: 'local', forced: true })).action, ACTION_UPDATE);
 });
 
-test('an installation ahead of the newest tag is kept, not downgraded', () => {
+test('an installation ahead of the newest tag is kept, not downgraded', async () => {
     const isAncestor = ancestry(new Map([['c3', 'c2'], ['c2', 'c1']]));
-    const plan = planUpdate({
+    const plan = await planUpdate({
         installedHead: 'c3',
         installedBranch: 'main',
         channel: { branch: 'main', mode: 'tag', tag: null },
@@ -150,7 +154,7 @@ test('an installation ahead of the newest tag is kept, not downgraded', () => {
     assert.equal(plan.action, ACTION_KEEP_AHEAD);
     assert.equal(plan.reason, 'installed-revision-is-newer-than-the-newest-release-tag');
 
-    rejectsCode(() => planUpdate({
+    await assert.rejects(planUpdate({
         installedHead: 'c3',
         installedBranch: 'main',
         channel: { branch: 'main', mode: 'tag', tag: null },
@@ -158,11 +162,11 @@ test('an installation ahead of the newest tag is kept, not downgraded', () => {
         target: { name: 'v0.5.0', commit: 'c1' },
         branchHead: 'c3',
         isAncestor,
-    }), 'UPDATER_OLDER_OR_DIVERGENT');
+    }), error => error.code === 'UPDATER_OLDER_OR_DIVERGENT');
 });
 
-test('an identical, clean, same-channel installation reports no change', () => {
-    const plan = planUpdate({
+test('an identical, clean, same-channel installation reports no change', async () => {
+    const plan = await planUpdate({
         installedHead: 'c3',
         installedBranch: 'main',
         channel: { branch: 'main', mode: 'tag', tag: null },
@@ -174,8 +178,8 @@ test('an identical, clean, same-channel installation reports no change', () => {
     assert.equal(plan.action, ACTION_UNCHANGED);
 });
 
-test('an installation without channel metadata rewrites it even at the same revision', () => {
-    const plan = planUpdate({
+test('an installation without channel metadata rewrites it even at the same revision', async () => {
+    const plan = await planUpdate({
         installedHead: 'c3',
         installedBranch: 'main',
         channel: { branch: 'main', mode: 'tag', tag: null },
@@ -186,8 +190,8 @@ test('an installation without channel metadata rewrites it even at the same revi
     assert.equal(plan.action, ACTION_UPDATE);
 });
 
-test('a development branch follows its own head in commit mode', () => {
-    const plan = planUpdate({
+test('a development branch follows its own head in commit mode', async () => {
+    const plan = await planUpdate({
         installedHead: 'd1',
         installedBranch: 'feat/in-app-updates',
         channel: { branch: 'feat/in-app-updates', mode: 'commit', tag: null },
@@ -202,12 +206,35 @@ test('a development branch follows its own head in commit mode', () => {
     assert.equal(plan.branch, 'feat/in-app-updates');
 });
 
-test('an installation without a Git revision cannot be updated', () => {
-    rejectsCode(() => planUpdate({
+test('an installation without a Git revision cannot be updated', async () => {
+    await assert.rejects(planUpdate({
         installedHead: '',
         channel: { branch: 'main', mode: 'tag', tag: null },
         target: { name: 'v0.5.0', commit: 'c3' },
         branchHead: 'c3',
         isAncestor: () => true,
-    }), 'UPDATER_NOT_INSTALLED');
+    }), error => error.code === 'UPDATER_NOT_INSTALLED');
+});
+
+test('merged history selects the closest tagged ancestor, not the newest timestamp', () => {
+    const branchHistory = [
+        { oid: 'merge', parents: ['main3', 'side'], timestamp: 100 },
+        { oid: 'side', parents: ['base'], timestamp: 90 },
+        { oid: 'main3', parents: ['main2'], timestamp: 30 },
+        { oid: 'main2', parents: ['main1'], timestamp: 20 },
+        { oid: 'main1', parents: ['base'], timestamp: 10 },
+        { oid: 'base', parents: [], timestamp: 0 },
+    ];
+    assert.deepEqual(selectReleaseTag({ branchHead: 'merge', branchHistory, tags: [
+        { name: 'v0.4.0', commit: 'side' }, { name: 'v0.5.0', commit: 'main3' },
+        { name: 'v0.1.0', commit: 'base' },
+    ] }), { name: 'v0.5.0', commit: 'main3' });
+    assert.deepEqual(selectReleaseTag({ branchHead: 'merge', branchHistory, tags: [
+        { name: 'v0.4.0', commit: 'side' }, { name: 'v0.5.0', commit: 'main3' },
+    ] }), { name: 'v0.4.0', commit: 'side' });
+});
+
+test('prerelease numeric suffixes use Git version order and a lone unknown tag is refused', () => {
+    assert.ok(compareTags('v0.5.0-rc10', 'v0.5.0-rc2') > 0);
+    rejectsCode(() => selectReleaseTag({ tags: [{ name: 'release-foo', commit: 'a' }], branchHistory: chain('a') }), 'UPDATER_UNKNOWN_TAG_SHAPE');
 });

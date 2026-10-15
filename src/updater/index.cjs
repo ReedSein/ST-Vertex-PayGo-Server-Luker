@@ -10,18 +10,16 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { isDeepStrictEqual } = require('node:util');
 const { PluginError } = require('../errors.cjs');
 const { createGitOperations } = require('./git-operations.cjs');
 const {
     OFFICIAL_REMOTES,
     locateComponent,
     resolveDirectories,
-    serverDirectory,
 } = require('./locations.cjs');
 const transaction = require('./transaction.cjs');
 const {
-    ACTION_KEEP_AHEAD,
-    ACTION_UNCHANGED,
     ACTION_UPDATE,
     inferChannel,
     planUpdate,
@@ -151,9 +149,9 @@ function createUpdater({
         const staged = path.join(staging, component.name);
         const { branchHead, history } = await gitOperations.stagedClone({ url: component.remote, directory: staged, branch: channel.branch });
         const target = channel.mode === 'tag'
-            ? selectReleaseTag({ tags: tags.entries, branchHistory: history })
+            ? selectReleaseTag({ tags: tags.entries, branchHistory: history, branchHead })
             : { name: null, commit: branchHead };
-        const decision = planUpdate({
+        const decision = await planUpdate({
             installedHead: installation.head,
             installedBranch: installation.branch,
             dirtyTrackedCount: installation.dirtyTrackedCount,
@@ -161,7 +159,7 @@ function createUpdater({
             metadata: installation.metadata,
             target,
             branchHead,
-            isAncestor: ({ older, newer }) => gitOperations.isAncestor({ directory: staged, older, newer }),
+            isAncestor: (older, newer) => gitOperations.isAncestor({ directory: staged, older, newer }),
         });
         return {
             ...base,
@@ -171,6 +169,7 @@ function createUpdater({
             target: { tag: decision.tag, commit: decision.commit },
             reason: decision.reason ?? null,
             staged,
+            originalMetadata: installation.metadata ?? null,
         };
     }
 
@@ -190,6 +189,11 @@ function createUpdater({
             const planned = [];
             for (const component of COMPONENTS) {
                 planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote)));
+            }
+            const tagged = planned.filter(component => component.channel?.mode === 'tag');
+            if (tagged.length === 2 && tagged[0].target.tag !== tagged[1].target.tag) {
+                throw new PluginError(409, 'UPDATER_TAG_MISMATCH',
+                    `Frontend/server tags are not aligned (${tagged[0].target.tag} / ${tagged[1].target.tag}). Wait for matching tags.`);
             }
             return { staging, components: planned };
         } catch (error) {
@@ -256,11 +260,15 @@ function createUpdater({
     }
 
     async function run() {
-        const plan = await planAll();
+        let plan = null;
         const backup = { directory: null };
         let lock = null;
         let activated = [];
         try {
+            // Share the installer's lock throughout preparation, then recheck
+            // snapshots to catch edits by tools that do not honor this lock.
+            lock = transaction.acquireLock(hostRoot);
+            plan = await planAll();
             // The two components ship as one release. Updating only the half that
             // happens to be updatable would leave a host running mismatched
             // versions, so a blocked component stops the whole update, exactly as
@@ -285,7 +293,8 @@ function createUpdater({
 
             job.phase = 'preparing';
             for (const component of changing) {
-                await gitOperations.materialize({ directory: component.staged, oid: component.target.commit });
+                await gitOperations.materialize({ directory: component.staged, oid: component.target.commit,
+                    branch: component.channel.mode === 'commit' ? component.channel.branch : null });
                 verifyPayload(component, component.staged);
                 gitOperations.writeMetadata(component.staged, {
                     branch: component.channel.branch,
@@ -296,7 +305,16 @@ function createUpdater({
             }
 
             job.phase = 'activating';
-            lock = transaction.acquireLock(hostRoot);
+            for (const component of plan.components) {
+                const directory = locate(component);
+                const current = await gitOperations.readInstallation(directory);
+                if (directory !== component.directory || !current.isRepository || current.dirtyTrackedCount > 0
+                    || current.head !== component.installed.commit || current.branch !== component.installed.branch
+                    || !isDeepStrictEqual(current.metadata ?? null, component.originalMetadata)) {
+                    throw new PluginError(409, 'UPDATER_INSTALLATION_CHANGED',
+                        `The ${component.label} changed during preparation. Nothing was replaced; check again.`);
+                }
+            }
             const entries = changing.map(component => ({
                 name: component.name,
                 target: component.directory,
@@ -326,6 +344,8 @@ function createUpdater({
                 const errors = transaction.rollback(activated);
                 if (errors.length > 0) {
                     note('error', 'updater_rollback_incomplete', { detail: errors.join('; ').slice(0, 256) });
+                    throw new PluginError(500, 'UPDATER_ROLLBACK_INCOMPLETE',
+                        `Update failed and rollback was incomplete: ${errors.join('; ')}. Recover from ${backup.directory}.`, { cause: error });
                 }
             }
             throw error;
@@ -337,7 +357,7 @@ function createUpdater({
                     note('warn', 'updater_lock_release_failed', { detail: String(error?.message ?? error).slice(0, 256) });
                 }
             }
-            transaction.removePath(plan.staging);
+            if (plan !== null) transaction.removePath(plan.staging);
         }
     }
 

@@ -23,6 +23,10 @@ const SERVER_OLD = 'b'.repeat(40);
 const FRONTEND_TIP = 'c'.repeat(40);
 const SERVER_TIP = 'd'.repeat(40);
 
+function chain(...oids) {
+    return oids.map((oid, index) => ({ oid, parents: oids.slice(index + 1, index + 2), timestamp: oids.length - index }));
+}
+
 function writeJson(file, value) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     fs.writeFileSync(file, JSON.stringify(value));
@@ -63,8 +67,8 @@ function makeGitOperations({ frontendState, serverState }) {
         async stagedClone({ url, directory }) {
             fs.mkdirSync(directory, { recursive: true });
             return url === FRONTEND_REMOTE
-                ? { branchHead: FRONTEND_TIP, history: [FRONTEND_TIP, FRONTEND_OLD] }
-                : { branchHead: SERVER_TIP, history: [SERVER_TIP, SERVER_OLD] };
+                ? { branchHead: FRONTEND_TIP, history: chain(FRONTEND_TIP, FRONTEND_OLD) }
+                : { branchHead: SERVER_TIP, history: chain(SERVER_TIP, SERVER_OLD) };
         },
         async materialize({ directory }) {
             if (path.basename(directory) === 'frontend') {
@@ -90,16 +94,16 @@ function installation(directory, { head, metadata, remote, dirtyTrackedCount = 0
     return { directory, isRepository, head, branch, dirtyTrackedCount, metadata, remoteUrl: remote };
 }
 
-function makeUpdater(host, overrides = {}) {
+function makeUpdater(host, overrides = {}, operations = {}) {
     return createUpdater({
         config: { values: {}, source: 'absent' },
         rootDir: host.root,
         now: () => new Date('2026-10-15T00:00:00.000Z'),
-        gitOperations: makeGitOperations({
+        gitOperations: { ...makeGitOperations({
             frontendState: installation(host.frontend, { head: FRONTEND_OLD, metadata: null, remote: FRONTEND_REMOTE }),
             serverState: installation(host.server, { head: SERVER_OLD, metadata: null, remote: SERVER_REMOTE }),
             ...overrides,
-        }),
+        }), ...operations },
     });
 }
 
@@ -206,4 +210,108 @@ test('a copy installed from a different origin is reported but still updated fro
     } finally {
         fs.rmSync(host.root, { recursive: true, force: true });
     }
+});
+
+test('asynchronous ancestry rejects a local-only revision before replacing either component', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {
+        frontendState: installation(host.frontend, { head: 'e'.repeat(40), remote: FRONTEND_REMOTE }),
+    });
+    await assert.rejects(updater.check(), error => error.code === 'UPDATER_LOCAL_COMMITS');
+    assert.equal((await updater.start()).code, 'UPDATER_LOCAL_COMMITS');
+    assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+    assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+    assert.equal(fs.existsSync(path.join(host.root, '.paygo-install-backups')), false);
+});
+
+test('main installations ahead of the latest tags are kept even without metadata', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {
+        frontendState: installation(host.frontend, { head: FRONTEND_TIP, remote: FRONTEND_REMOTE }),
+        serverState: installation(host.server, { head: SERVER_TIP, remote: SERVER_REMOTE }),
+    }, {
+        async listRemoteTags(url) {
+            return [{ name: 'v0.4.0', commit: url === FRONTEND_REMOTE ? FRONTEND_OLD : SERVER_OLD }];
+        },
+    });
+    const report = await updater.check();
+    assert.equal(report.status, 'up-to-date');
+    assert.deepEqual(report.components.map(c => c.status), ['keep-ahead', 'keep-ahead']);
+    assert.equal((await updater.start()).status, 'no-change');
+});
+
+test('different release tags refuse the pair before activation', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {}, {
+        async listRemoteTags(url) {
+            return [{ name: url === FRONTEND_REMOTE ? 'v0.5.1' : 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_TIP : SERVER_TIP }];
+        },
+    });
+    await assert.rejects(updater.check(), error => error.code === 'UPDATER_TAG_MISMATCH');
+    assert.equal((await updater.start()).code, 'UPDATER_TAG_MISMATCH');
+    assert.equal(fs.existsSync(path.join(host.root, '.paygo-install-backups')), false);
+});
+
+test('development channels plan branch-head updates without a release tag', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {
+        frontendState: installation(host.frontend, { head: FRONTEND_OLD, branch: 'dev', remote: FRONTEND_REMOTE }),
+        serverState: installation(host.server, { head: SERVER_OLD, branch: 'dev', remote: SERVER_REMOTE }),
+    });
+    const report = await updater.check();
+    assert.equal(report.status, 'update-available');
+    assert.deepEqual(report.components.map(c => c.target.tag), [null, null]);
+    assert.equal((await updater.start()).status, 'updated');
+});
+
+test('a failed second download leaves both installed components unchanged and releases the lock', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {}, {
+        async stagedClone({ url, directory }) {
+            if (url === SERVER_REMOTE) throw new Error('fixture download failed');
+            fs.mkdirSync(directory, { recursive: true });
+            return { branchHead: FRONTEND_TIP, history: chain(FRONTEND_TIP, FRONTEND_OLD) };
+        },
+    });
+    assert.equal((await updater.start()).status, 'failed');
+    assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+    assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+    assert.deepEqual(fs.readdirSync(host.root).filter(name => name.startsWith('.paygo-install')), []);
+});
+
+test('edits made during preparation are detected before either installation is moved', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    let reads = 0;
+    const updater = makeUpdater(host, {}, {
+        async readInstallation(directory) {
+            const frontend = directory === host.frontend;
+            reads += 1;
+            return installation(directory, { head: frontend ? FRONTEND_OLD : SERVER_OLD,
+                remote: frontend ? FRONTEND_REMOTE : SERVER_REMOTE, dirtyTrackedCount: reads > 2 ? 1 : 0 });
+        },
+    });
+    const result = await updater.start();
+    assert.equal(result.status, 'failed');
+    assert.equal(result.code, 'UPDATER_INSTALLATION_CHANGED');
+    assert.equal(fs.existsSync(path.join(host.root, '.paygo-install-backups')), false);
+});
+
+test('the installation lock covers preparation and concurrent starts are refused', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {}, {
+        async listRemoteTags(url) {
+            assert.equal(fs.existsSync(path.join(host.root, '.paygo-install.lock')), true);
+            return [{ name: 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_TIP : SERVER_TIP }];
+        },
+    });
+    const task = updater.start();
+    assert.throws(() => updater.start(), error => error.code === 'UPDATER_IN_PROGRESS');
+    assert.equal((await task).status, 'updated');
 });
