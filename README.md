@@ -1,5 +1,7 @@
 # ST Vertex AI PayGo Server Plugin
 
+> **Luker 测试通道 · 0.5.0-luker.1**：在管理员面板安装 `https://github.com/ReedSein/ST-Vertex-PayGo-Server-Luker`，配套前端为 `https://github.com/ReedSein/ST-Vertex-PayGo-Luker`。默认分支 `test/luker-updates` 按提交更新；PayGo 面板的配套更新源固定为这两个测试 fork。安装或更新后重启宿主并刷新前端。作者正式版本的说明保留在下文。
+
 本项目是前端扩展 `ST-Vertex-PayGo` 的**配套后端插件（Server Plugin）**，为 SillyTavern（酒馆）及 Luker 提供 Google Vertex AI 的 **Standard、PayGo-only、Flex、Priority** 调度能力，并支持 **Google AI Studio 的 Standard 与 Flex** 服务层级及当前对话的 token 用量记录。
 
 > ⚠️ **使用须知**：

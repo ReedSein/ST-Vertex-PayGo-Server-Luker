@@ -16,8 +16,8 @@ const path = require('node:path');
 
 const { createUpdater } = require('../src/updater/index.cjs');
 
-const FRONTEND_REMOTE = 'https://github.com/mananekoha114/ST-Vertex-PayGo.git';
-const SERVER_REMOTE = 'https://github.com/mananekoha114/ST-Vertex-PayGo-Server.git';
+const FRONTEND_REMOTE = 'https://github.com/ReedSein/ST-Vertex-PayGo-Luker.git';
+const SERVER_REMOTE = 'https://github.com/ReedSein/ST-Vertex-PayGo-Server-Luker.git';
 const FRONTEND_OLD = 'a'.repeat(40);
 const SERVER_OLD = 'b'.repeat(40);
 const FRONTEND_TIP = 'c'.repeat(40);

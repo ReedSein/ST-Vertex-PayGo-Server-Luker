@@ -17,7 +17,7 @@ const { PluginError } = require('../errors.cjs');
 // one of them. The identity rules are the installer's, not new ones: the
 // frontend manifest that the host itself reads, and the server package name.
 //
-// Updates always come from the official repositories below, never from
+// This test channel updates from the paired Luker forks below, never from
 // whatever origin a copy happens to carry. The installed origin is read only
 // to report a mismatch.
 
@@ -28,8 +28,8 @@ const SERVER_PACKAGE_NAME = 'st-vertex-paygo-server';
 const METADATA_FILE = 'paygo-updater.json';
 
 const OFFICIAL_REMOTES = Object.freeze({
-    frontend: 'https://github.com/mananekoha114/ST-Vertex-PayGo.git',
-    server: 'https://github.com/mananekoha114/ST-Vertex-PayGo-Server.git',
+    frontend: 'https://github.com/ReedSein/ST-Vertex-PayGo-Luker.git',
+    server: 'https://github.com/ReedSein/ST-Vertex-PayGo-Server-Luker.git',
 });
 
 const DEFAULT_PLUGINS_PATH = 'plugins';
