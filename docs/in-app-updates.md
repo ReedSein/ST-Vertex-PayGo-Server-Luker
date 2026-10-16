@@ -84,6 +84,15 @@ uses the bundled JavaScript implementation. Unsupported tag names fail explicitl
 
 ## What an update does
 
+Directory hosts keep the CLI's lock, staging and backups in the program root.
+Luker APKs can keep both plugin directories outside the extracted program, under
+the configured `dataRoot`. That data root becomes the update storage boundary
+only when both directories are inside it and the running server plugin was
+loaded from its configured plugin directory. A filesystem root, mixed external
+roots and symlink paths are refused. Each operation resolves this layout once;
+staging and `.paygo-install-backups` then stay in the same storage as the APK's
+installed components. Recovery uses the targets recorded in `restore.json`.
+
 1. Take the installer's lock, check both components and clone the target revisions into a staging
    directory, still without touching an installation.
 2. Verify each prepared copy is the component it claims to be, still has its

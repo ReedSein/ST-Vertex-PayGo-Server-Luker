@@ -17,6 +17,7 @@ const {
     OFFICIAL_REMOTES,
     locateComponent,
     resolveDirectories,
+    serverDirectory,
 } = require('./locations.cjs');
 const transaction = require('./transaction.cjs');
 const {
@@ -91,6 +92,7 @@ function createUpdater({
     gitOperations = createGitOperations(),
     config = undefined,
     rootDir = null,
+    pluginDirectory = serverDirectory(),
     now = () => new Date(),
 } = {}) {
     const hostRoot = rootDir ?? process.cwd();
@@ -106,11 +108,11 @@ function createUpdater({
     }
 
     function directories() {
-        return resolveDirectories(hostRoot, { config });
+        return resolveDirectories(hostRoot, { config, pluginDirectory });
     }
 
-    function locate(component) {
-        const found = locateComponent(component.name, directories());
+    function locate(component, resolved) {
+        const found = locateComponent(component.name, resolved);
         if (found.length === 0) {
             throw new PluginError(
                 409,
@@ -129,8 +131,8 @@ function createUpdater({
     }
 
     // Everything a decision needs, with nothing written to the installation.
-    async function planComponent(component, staging, tags) {
-        const directory = locate(component);
+    async function planComponent(component, staging, tags, resolved) {
+        const directory = locate(component, resolved);
         const installation = await gitOperations.readInstallation(directory);
         const base = {
             name: component.name,
@@ -173,8 +175,8 @@ function createUpdater({
         };
     }
 
-    async function planAll() {
-        const staging = transaction.createStaging(hostRoot);
+    async function planAll(resolved) {
+        const staging = transaction.createStaging(resolved.updateRoot);
         try {
             const tagsByRemote = new Map();
             for (const component of COMPONENTS) {
@@ -188,7 +190,7 @@ function createUpdater({
             }
             const planned = [];
             for (const component of COMPONENTS) {
-                planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote)));
+                planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote), resolved));
             }
             const tagged = planned.filter(component => component.channel?.mode === 'tag');
             if (tagged.length === 2 && tagged[0].target.tag !== tagged[1].target.tag) {
@@ -212,7 +214,7 @@ function createUpdater({
     }
 
     async function check() {
-        const plan = await planAll();
+        const plan = await planAll(directories());
         try {
             return { ...summarise(plan.components), checkedAt: now().toISOString(), components: plan.components.map(publicComponent) };
         } finally {
@@ -267,8 +269,9 @@ function createUpdater({
         try {
             // Share the installer's lock throughout preparation, then recheck
             // snapshots to catch edits by tools that do not honor this lock.
-            lock = transaction.acquireLock(hostRoot);
-            plan = await planAll();
+            const resolved = directories();
+            lock = transaction.acquireLock(resolved.updateRoot);
+            plan = await planAll(resolved);
             // The two components ship as one release. Updating only the half that
             // happens to be updatable would leave a host running mismatched
             // versions, so a blocked component stops the whole update, exactly as
@@ -306,7 +309,7 @@ function createUpdater({
 
             job.phase = 'activating';
             for (const component of plan.components) {
-                const directory = locate(component);
+                const directory = locate(component, resolved);
                 const current = await gitOperations.readInstallation(directory);
                 if (directory !== component.directory || !current.isRepository || current.dirtyTrackedCount > 0
                     || current.head !== component.installed.commit || current.branch !== component.installed.branch
@@ -320,8 +323,8 @@ function createUpdater({
                 target: component.directory,
                 staged: component.staged,
             }));
-            backup.directory = transaction.createBackup(hostRoot, entries);
-            activated = transaction.activate({ rootDir: hostRoot, backup: backup.directory, entries });
+            backup.directory = transaction.createBackup(resolved.updateRoot, entries);
+            activated = transaction.activate({ rootDir: resolved.updateRoot, backup: backup.directory, entries });
 
             const components = plan.components.map(component => (component.status === ACTION_UPDATE
                 ? { ...publicComponent(component), status: 'updated' }

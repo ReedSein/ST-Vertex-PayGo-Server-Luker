@@ -159,6 +159,30 @@ test('a host without config.yaml falls back to the documented defaults', () => {
     }
 });
 
+test('APK components outside the program use their configured data root as the storage boundary', t => {
+    const root = makeHost();
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-apk-data-'));
+    t.after(() => { cleanup(root); cleanup(data); });
+    const server = path.join(data, 'plugins', 'server');
+    const frontend = path.join(data, 'extensions', 'third-party', 'frontend');
+    writeJson(path.join(server, 'package.json'), { name: 'st-vertex-paygo-server' });
+    writeJson(path.join(frontend, 'manifest.json'), { display_name: 'Vertex AI PayGo Tiers' });
+    const options = {
+        commandLine: { dataRoot: data, serverPluginsPath: path.dirname(server), globalExtensionsPath: path.dirname(frontend) },
+        config: { values: {}, source: 'absent' },
+        pluginDirectory: server,
+    };
+    const directories = resolveDirectories(root, options);
+    assert.equal(directories.updateRoot, data);
+    assert.deepEqual(locateComponent('server', directories), [server]);
+    assert.deepEqual(locateComponent('frontend', directories), [frontend]);
+    assert.throws(() => resolveDirectories(root, { ...options, pluginDirectory: path.join(root, 'plugins/server') }), e => e.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, dataRoot: path.parse(data).root } }), e => e.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, globalExtensionsPath: path.join(root, 'public/extensions') } }), e => e.code === 'UPDATER_UNSAFE_PATH');
+    fs.symlinkSync(path.dirname(frontend), path.join(data, 'linked-extensions'));
+    assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, globalExtensionsPath: path.join(data, 'linked-extensions') } }), e => e.code === 'UPDATER_UNSAFE_PATH');
+});
+
 test('component discovery refuses a matching installation reached through a symlink', () => {
     const root = makeHost();
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-outside-'));

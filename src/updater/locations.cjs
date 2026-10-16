@@ -57,12 +57,12 @@ function inside(root, target) {
     return relative === '' || (!relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative));
 }
 
-// Rejects a managed path that leaves the host root or crosses a symlink, the
+// Rejects a managed path that leaves the selected storage root or crosses a symlink, the
 // same way the installer refuses to operate through links.
 function resolveWithinHost(rootDir, target) {
     const resolved = path.resolve(target);
     if (!inside(rootDir, resolved) || resolved === rootDir) {
-        throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `Refusing to manage a path outside the host root: ${resolved}`);
+        throw new PluginError(500, 'UPDATER_UNSAFE_PATH', `Refusing to manage a path outside the update storage root: ${resolved}`);
     }
     let cursor = rootDir;
     for (const part of path.relative(rootDir, resolved).split(path.sep)) {
@@ -130,7 +130,8 @@ function readStringOption(values, key) {
 
 // Command-line overrides win over config.yaml, exactly as the host resolves
 // them, and the host publishes them on globalThis at startup.
-function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARGS, config = undefined } = {}) {
+function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARGS, config = undefined, pluginDirectory = serverDirectory() } = {}) {
+    rootDir = path.resolve(rootDir);
     const hostConfig = config ?? readHostConfig(rootDir);
     const values = hostConfig.values ?? {};
     const pluginsPath = readStringOption(commandLine, 'serverPluginsPath')
@@ -142,11 +143,34 @@ function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARG
     const dataRoot = readStringOption(commandLine, 'dataRoot')
         ?? readStringOption(values, 'dataRoot')
         ?? DEFAULT_DATA_ROOT;
+    const pluginsDirectory = path.resolve(rootDir, pluginsPath);
+    const extensionsDirectory = path.resolve(rootDir, extensionsPath);
+    const dataRootDirectory = path.resolve(rootDir, dataRoot);
+    let updateRoot = rootDir;
+    if (!inside(rootDir, pluginsDirectory) || !inside(rootDir, extensionsDirectory)) {
+        // APKs keep writable plugins in data storage outside the extracted
+        // program. Only that configured root is eligible, and the running
+        // plugin must actually have been loaded from its plugin directory.
+        // Never infer a common ancestor or permit arbitrary external paths.
+        const loadedPlugin = path.resolve(pluginDirectory);
+        if (dataRootDirectory === path.parse(dataRootDirectory).root
+            || !isDirectory(dataRootDirectory) || fs.lstatSync(dataRootDirectory).isSymbolicLink()
+            || !inside(dataRootDirectory, pluginsDirectory) || !inside(dataRootDirectory, extensionsDirectory)
+            || path.dirname(loadedPlugin) !== pluginsDirectory) {
+            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', 'External plugin directories must share the configured data root and contain the running server plugin.');
+        }
+        resolveWithinHost(dataRootDirectory, loadedPlugin);
+        if (!serverIdentity(loadedPlugin)) {
+            throw new PluginError(500, 'UPDATER_UNSAFE_PATH', 'The configured storage does not contain the running PayGo server plugin.');
+        }
+        updateRoot = dataRootDirectory;
+    }
     return Object.freeze({
         rootDir,
-        pluginsDirectory: resolveWithinHost(rootDir, path.resolve(rootDir, pluginsPath)),
-        extensionsDirectory: resolveWithinHost(rootDir, path.resolve(rootDir, extensionsPath)),
-        dataRootDirectory: path.resolve(rootDir, dataRoot),
+        updateRoot,
+        pluginsDirectory: resolveWithinHost(updateRoot, pluginsDirectory),
+        extensionsDirectory: resolveWithinHost(updateRoot, extensionsDirectory),
+        dataRootDirectory,
         configSource: hostConfig.source,
     });
 }
@@ -172,7 +196,7 @@ function locateComponent(component, directories) {
         for (const entry of fs.readdirSync(root, { withFileTypes: true })) {
             if (!entry.isDirectory() && !entry.isSymbolicLink()) continue;
             const candidate = path.join(root, entry.name);
-            if (componentIdentity(component, candidate)) matches.push(resolveWithinHost(directories.rootDir, candidate));
+            if (componentIdentity(component, candidate)) matches.push(resolveWithinHost(directories.updateRoot, candidate));
         }
     }
     return matches.sort();
