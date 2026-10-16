@@ -94,7 +94,7 @@ function installation(directory, { head, metadata, remote, dirtyTrackedCount = 0
     return { directory, isRepository, head, branch, dirtyTrackedCount, metadata, remoteUrl: remote };
 }
 
-function makeUpdater(host, overrides = {}, operations = {}) {
+function makeUpdater(host, overrides = {}, operations = {}, context = {}) {
     return createUpdater({
         config: { values: {}, source: 'absent' },
         rootDir: host.root,
@@ -104,6 +104,7 @@ function makeUpdater(host, overrides = {}, operations = {}) {
             serverState: installation(host.server, { head: SERVER_OLD, metadata: null, remote: SERVER_REMOTE }),
             ...overrides,
         }), ...operations },
+        ...context,
     });
 }
 
@@ -142,6 +143,50 @@ test('an update replaces both components, records the channel, and keeps a usabl
     } finally {
         fs.rmSync(host.root, { recursive: true, force: true });
     }
+});
+
+test('APK updates stage, lock, back up and replace inside external data storage', async t => {
+    const host = makeHost();
+    const data = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-apk-storage-'));
+    t.after(() => { fs.rmSync(host.root, { recursive: true, force: true }); fs.rmSync(data, { recursive: true, force: true }); });
+    const oldFrontend = host.frontend;
+    const oldServer = host.server;
+    host.frontend = path.join(data, 'extensions', 'frontend');
+    host.server = path.join(data, 'plugins', 'server');
+    fs.mkdirSync(path.dirname(host.frontend), { recursive: true });
+    fs.mkdirSync(path.dirname(host.server), { recursive: true });
+    fs.renameSync(oldFrontend, host.frontend);
+    fs.renameSync(oldServer, host.server);
+    const values = { dataRoot: data, serverPluginsPath: path.dirname(host.server), globalExtensionsPath: path.dirname(host.frontend) };
+    const updater = makeUpdater(host, {}, {
+        async listRemoteTags(url) {
+            assert.equal(fs.existsSync(path.join(data, '.paygo-install.lock')), true);
+            assert.equal(fs.existsSync(path.join(host.root, '.paygo-install.lock')), false);
+            return [{ name: 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_TIP : SERVER_TIP }];
+        },
+    }, { config: { values, source: 'config' }, pluginDirectory: host.server });
+    const result = await updater.start();
+    assert.equal(result.status, 'updated', result.message);
+    assert.equal(path.dirname(path.dirname(result.backup)), data);
+    assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'new server\n');
+    const restore = JSON.parse(fs.readFileSync(path.join(result.backup, 'restore.json'), 'utf8'));
+    assert.equal(restore.host, data);
+    assert.ok(restore.components.every(c => c.staged.startsWith(path.join(data, '.paygo-install-stage-'))));
+    assert.deepEqual(fs.readdirSync(data).filter(n => n.startsWith('.paygo-install')), ['.paygo-install-backups']);
+    assert.deepEqual(fs.readdirSync(host.root).filter(n => n.startsWith('.paygo-install')), []);
+});
+
+test('a job keeps one host directory snapshot throughout preparation and activation', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    let reads = 0;
+    const config = { source: 'config', get values() {
+        reads++;
+        return reads === 1 ? {} : { serverPluginsPath: path.join(host.root, 'changed-plugins') };
+    } };
+    const result = await makeUpdater(host, {}, {}, { config }).start();
+    assert.equal(result.status, 'updated', result.message);
+    assert.equal(reads, 1);
 });
 
 test('a blocked component stops the whole update instead of shipping half a release', async () => {
