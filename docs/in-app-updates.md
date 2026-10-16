@@ -21,7 +21,12 @@ Android there is no system Git at all. The panel therefore keeps the installer's
 - Git work is done by isomorphic-git, bundled into
   `vendor/isomorphic-git.bundle.cjs` by `scripts/build-vendor.mjs`. The bundle
   is committed so that users still install nothing; `npm run vendor:check`
-  fails when it no longer matches the pinned versions.
+  fails when it no longer matches the pinned versions. The adjacent
+  `vendor/THIRD_PARTY_NOTICES.txt` preserves bundled package licenses and source
+  notices, generated and checked from the same build inputs. This includes the
+  LGPL-3.0-or-later notice for isomorphic-git's embedded `@zenfs/core/path`
+  implementation and the complete LGPL/GPL texts. The unminified bundle and
+  locked build inputs remain available in this repository.
 - The replacement transaction keeps the installer's shape: one lock, a staging
   directory on the same filesystem, a timestamped backup with a restore record,
   activation by rename, and rollback from that record.
