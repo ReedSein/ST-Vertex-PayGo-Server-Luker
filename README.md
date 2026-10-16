@@ -1,6 +1,6 @@
 # ST Vertex AI PayGo Server Plugin
 
-> **Luker 测试通道 · 0.5.0-luker.1**：在管理员面板安装 `https://github.com/ReedSein/ST-Vertex-PayGo-Server-Luker`，配套前端为 `https://github.com/ReedSein/ST-Vertex-PayGo-Luker`。默认分支 `test/luker-updates` 按提交更新；PayGo 面板的配套更新源固定为这两个测试 fork。安装或更新后重启宿主并刷新前端。作者正式版本的说明保留在下文。
+> **Luker 测试通道 · 0.5.1-luker.1**：在管理员面板安装 `https://github.com/ReedSein/ST-Vertex-PayGo-Server-Luker`，配套前端为 `https://github.com/ReedSein/ST-Vertex-PayGo-Luker`。默认分支 `test/luker-updates` 按提交更新；PayGo 面板的配套更新源固定为这两个测试 fork。安装或更新后重启宿主并刷新前端。作者正式版本的说明保留在下文。
 
 本项目是前端扩展 `ST-Vertex-PayGo` 的**配套后端插件（Server Plugin）**，为 SillyTavern（酒馆）及 Luker 提供 Google Vertex AI 的 **Standard、PayGo-only、Flex、Priority** 调度能力，并支持 **Google AI Studio 的 Standard 与 Flex** 服务层级及当前对话的 token 用量记录。
 
@@ -12,6 +12,8 @@
 ---
 
 ## 0.5.0：Google OpenAI 兼容桥接
+
+当前配套版本为 **v0.5.1（2026-10-16）**。前端 v0.5.1 修复了准备失败被二次 CSRF 错误覆盖的问题，明确显示服务端错误码、消息及 HTTP 状态；本版本服务端保持协议 v2。
 
 0.5.0（2026-10-14）提供可选的本机 OpenAI 兼容入口，需配套 0.5.0 前端管理；仅支持 **SillyTavern / Luker，TauriTavern 不支持桥接**。从旧版本升级后，桥接首次仍需用户手动启用；成功启用后会保存设置，并在后续宿主启动时自动恢复。没有保存配置的用户默认关闭。
 
@@ -123,7 +125,7 @@ SillyTavern 与 Luker 原生请求管道并未对外暴露 Google 专有的 PayG
 - **宿主程序**：SillyTavern ≥ 1.16.0 或 Luker ≥ 2.7.0（release 分支）
 - **运行环境**：Node.js ≥ 20
 - **前置依赖**：宿主内已配置可用的 Vertex AI（Express 快速密钥模式或 Service Account 服务账号均可）
-- **配套组件**：本插件与 `ST-Vertex-PayGo` 前端扩展均更新至 0.5.0（协议 v2），更新后重启酒馆并刷新前端页面
+- **配套组件**：本插件与 `ST-Vertex-PayGo` 前端扩展均更新至 0.5.1（协议 v2），更新后重启酒馆并刷新前端页面
 
 > 💡 **启动防御机制**：插件启动时会自动对宿主的 `package.json` 与 `src/endpoints/google.js` 进行静态完整性校验。若宿主版本过低或核心路由被第三方破坏，插件将主动终止初始化以防引发未定义崩溃。
 
