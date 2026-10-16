@@ -5,6 +5,7 @@
 - 前端面板新增管理员专用的组件更新入口：检查两个组件、把同一配套 tag 应用到前后端、替换前备份、失败回滚，效果与命令行的更新入口一致。
 - 更新在宿主运行中完成，不依赖系统 Git 与 npm：isomorphic-git 以打包产物入库，用户仍不需要安装任何依赖；`npm run vendor:check` 会在产物与固定版本不一致时失败。
 - 版本规则沿用安装器：`main` 追随最近可达 tag、其他分支追随自身提交、同一提交多 tag 按版本决胜、已装版本领先时不降级、本地修改与本地提交默认阻止、组件被阻塞则整体不更新。
+- 默认通道与安装器共用可校验规则：当前检出分支优先于旧记录，一次 `--mode commit` 不会固定 main 的后续默认策略；同时核对标签检出的分离 HEAD，避免错误地跳过必要切换。
 - 更新前覆盖异步祖先校验、未跟踪文件保护与配套标签检查；准备全程持有安装锁，激活前重新核对安装状态，拒绝路径软链接和损坏的通道记录。补充真实 Git 对照、进程中断及备份恢复测试。
 - 新增三条管理员接口 `GET/POST /api/plugins/vertex-paygo/update` 与 `GET /api/plugins/vertex-paygo/update/status`，并在 `/health` 的 `capabilities` 中增加 `updater` 字段。规则与恢复边界见 [docs/in-app-updates.md](docs/in-app-updates.md)。
 - 宿主的 `enableServerPluginsAutoUpdate` 与 Luker 自带的扩展更新按钮不受影响，也不会被本功能修改；固定版本的用户需自行关闭宿主自动更新。

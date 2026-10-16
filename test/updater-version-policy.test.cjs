@@ -86,13 +86,13 @@ test('tag selection fails loudly instead of guessing', () => {
     }), 'UPDATER_NO_REACHABLE_TAG');
 });
 
-test('the release channel comes from recorded metadata first, then from the branch', () => {
+test('the checked-out branch wins over older tracking metadata, as in the CLI', () => {
     assert.deepEqual(
         inferChannel({
             symbolicBranch: 'feat/other',
             metadata: { schema: 1, branch: 'main', mode: 'tag', tag: 'v0.5.0', commit: 'c9' },
         }),
-        { branch: 'main', mode: 'tag', tag: 'v0.5.0', source: 'metadata' },
+        { branch: 'feat/other', mode: 'commit', tag: null, source: 'branch' },
     );
     assert.equal(inferChannel({ symbolicBranch: 'main' }).mode, 'tag');
     assert.equal(inferChannel({ symbolicBranch: 'feat/in-app-updates' }).mode, 'commit');
@@ -100,6 +100,18 @@ test('the release channel comes from recorded metadata first, then from the bran
         inferChannel({ headTags: ['v0.5.0'] }),
         { branch: 'main', mode: 'tag', tag: 'v0.5.0', source: 'tag' },
     );
+});
+
+test('a one-off main commit mode does not change the default release channel', () => {
+    const metadata = { schema: 1, branch: 'main', mode: 'commit', tag: null, commit: 'c9' };
+    for (const symbolicBranch of ['main', null]) {
+        const channel = inferChannel({ symbolicBranch, metadata });
+        assert.equal(channel.branch, 'main');
+        assert.equal(channel.mode, 'tag');
+    }
+    assert.deepEqual(inferChannel({ metadata: {
+        schema: 1, branch: 'development', mode: 'commit', tag: null, commit: 'c9',
+    } }), { branch: 'development', mode: 'commit', tag: null, source: 'metadata' });
 });
 
 test('unusable channel records fail closed', () => {
@@ -156,7 +168,7 @@ test('an installation ahead of the newest tag is kept, not downgraded', async ()
 
     await assert.rejects(planUpdate({
         installedHead: 'c3',
-        installedBranch: 'main',
+        installedBranch: 'other',
         channel: { branch: 'main', mode: 'tag', tag: null },
         metadata: { schema: 1, branch: 'other', mode: 'tag', tag: 'v0.5.0', commit: 'c3' },
         target: { name: 'v0.5.0', commit: 'c1' },
@@ -168,7 +180,7 @@ test('an installation ahead of the newest tag is kept, not downgraded', async ()
 test('an identical, clean, same-channel installation reports no change', async () => {
     const plan = await planUpdate({
         installedHead: 'c3',
-        installedBranch: 'main',
+        installedBranch: null,
         channel: { branch: 'main', mode: 'tag', tag: null },
         metadata: { schema: 1, branch: 'main', mode: 'tag', tag: 'v0.5.0', commit: 'c3' },
         target: { name: 'v0.5.0', commit: 'c3' },
@@ -176,6 +188,27 @@ test('an identical, clean, same-channel installation reports no change', async (
         isAncestor: ancestry(new Map([['c3', 'c2']])),
     });
     assert.equal(plan.action, ACTION_UNCHANGED);
+});
+
+test('main ahead-of-tag protection follows the checked-out branch over stale metadata', async () => {
+    const plan = await planUpdate({
+        installedHead: 'c3', installedBranch: 'main',
+        channel: { branch: 'main', mode: 'tag' },
+        metadata: { schema: 1, branch: 'other', mode: 'commit', tag: null, commit: 'c3' },
+        target: { name: 'v0.5.0', commit: 'c1' }, branchHead: 'c3',
+        isAncestor: ancestry(new Map([['c3', 'c2'], ['c2', 'c1']])),
+    });
+    assert.equal(plan.action, ACTION_KEEP_AHEAD);
+});
+
+test('a branch at the selected tag must still become a detached tag installation', async () => {
+    const plan = await planUpdate({
+        installedHead: 'c3', installedBranch: 'main',
+        channel: { branch: 'main', mode: 'tag' },
+        metadata: { schema: 1, branch: 'main', mode: 'tag', tag: 'v0.5.0', commit: 'c3' },
+        target: { name: 'v0.5.0', commit: 'c3' }, branchHead: 'c3', isAncestor: () => true,
+    });
+    assert.equal(plan.action, ACTION_UPDATE);
 });
 
 test('an installation without channel metadata rewrites it even at the same revision', async () => {

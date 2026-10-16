@@ -176,11 +176,13 @@ test('an installation already on the selected release is left alone', async () =
                 head: FRONTEND_TIP,
                 metadata: { schema: 1, branch: 'main', mode: 'tag', tag: 'v0.5.0', commit: FRONTEND_TIP },
                 remote: FRONTEND_REMOTE,
+                branch: null,
             }),
             serverState: installation(host.server, {
                 head: SERVER_TIP,
                 metadata: { schema: 1, branch: 'main', mode: 'tag', tag: 'v0.5.0', commit: SERVER_TIP },
                 remote: SERVER_REMOTE,
+                branch: null,
             }),
         });
         const report = await updater.check();
@@ -240,6 +242,24 @@ test('main installations ahead of the latest tags are kept even without metadata
     assert.equal(report.status, 'up-to-date');
     assert.deepEqual(report.components.map(c => c.status), ['keep-ahead', 'keep-ahead']);
     assert.equal((await updater.start()).status, 'no-change');
+});
+
+test('main metadata in commit mode still plans the release tag, not unreleased commits', async t => {
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const updater = makeUpdater(host, {
+        frontendState: installation(host.frontend, { head: FRONTEND_OLD, remote: FRONTEND_REMOTE,
+            metadata: { schema: 1, branch: 'main', mode: 'commit', tag: null, commit: FRONTEND_OLD } }),
+        serverState: installation(host.server, { head: SERVER_OLD, remote: SERVER_REMOTE,
+            metadata: { schema: 1, branch: 'main', mode: 'commit', tag: null, commit: SERVER_OLD } }),
+    }, {
+        async listRemoteTags(url) {
+            return [{ name: 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_OLD : SERVER_OLD }];
+        },
+    });
+    const report = await updater.check();
+    assert.deepEqual(report.components.map(c => c.channel.mode), ['tag', 'tag']);
+    assert.deepEqual(report.components.map(c => c.target.commit), [FRONTEND_OLD, SERVER_OLD]);
 });
 
 test('different release tags refuse the pair before activation', async t => {

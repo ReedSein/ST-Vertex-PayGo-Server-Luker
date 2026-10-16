@@ -13,9 +13,11 @@ running, the plugin is itself one of the directories being replaced, and on
 Android there is no system Git at all. The panel therefore keeps the installer's
 *decisions* and replaces its *machinery*:
 
-- Version selection, channel inference, local-change and local-commit
-  protection, and the no-downgrade rule are reimplemented in
-  `src/updater/version-policy.cjs` and exercised without a repository.
+- Default channel and mode decisions come from the frontend installer's
+  `scripts/update-channel.cjs`, carried as an exact snapshot in
+  `vendor/update-channel.cjs`. The adjacent source record pins the frontend
+  commit and SHA-256. Git tag selection and history protection are adapted in
+  `src/updater/version-policy.cjs` and checked against native Git.
 - Git work is done by isomorphic-git, bundled into
   `vendor/isomorphic-git.bundle.cjs` by `scripts/build-vendor.mjs`. The bundle
   is committed so that users still install nothing; `npm run vendor:check`
@@ -23,6 +25,14 @@ Android there is no system Git at all. The panel therefore keeps the installer's
 - The replacement transaction keeps the installer's shape: one lock, a staging
   directory on the same filesystem, a timestamped backup with a restore record,
   activation by rename, and rollback from that record.
+
+After changing the frontend policy, commit it there and run
+`npm run policy:sync -- --source ../ST-Vertex-PayGo` in this repository.
+`npm run policy:check` verifies snapshot integrity;
+`npm run policy:check -- --source ../ST-Vertex-PayGo` additionally compares the
+snapshot with that exact Git commit and the current frontend source. Neither
+command downloads or executes remote code. Users do not run these development
+commands when installing the plugin.
 
 ## Endpoints
 
@@ -46,10 +56,11 @@ when an administrator clicks, so nothing polls a remote on its own.
 
 The policy follows `scripts/install.mjs`:
 
-- The channel comes from `.git/paygo-updater.json` when it exists, otherwise
-  from the checked-out branch: `main` follows release tags, any other branch
-  follows its own head. A detached HEAD sitting exactly on a release tag is read
-  as the `main` tag channel, decided by Git and never by `package.json`.
+- The current checked-out branch takes priority over the branch recorded in
+  `.git/paygo-updater.json`. With neither, a detached HEAD sitting exactly on a
+  release tag identifies `main`, decided by Git and never by `package.json`.
+  Each default update follows tags on `main` and commits on other branches;
+  metadata from a previous one-off CLI `--mode commit` cannot pin that choice.
 - On the tag channel the target follows `git describe --tags --abbrev=0`,
   including its bounded, date-ordered candidate search through merges. Two tags on one
   commit are separated by version, and a release outranks its own prereleases,

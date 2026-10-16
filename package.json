@@ -16,7 +16,9 @@
   "scripts": {
     "test": "node --test",
     "vendor:build": "node scripts/build-vendor.mjs",
-    "vendor:check": "node scripts/build-vendor.mjs --check"
+    "vendor:check": "node scripts/build-vendor.mjs --check",
+    "policy:sync": "node scripts/sync-update-policy.mjs",
+    "policy:check": "node scripts/sync-update-policy.mjs --check"
   },
   "devDependencies": {
     "esbuild": "0.28.2",

@@ -9,6 +9,7 @@
 'use strict';
 
 const { PluginError } = require('../errors.cjs');
+const { inferUpdateChannel } = require('../../vendor/update-channel.cjs');
 
 // The panel updater has to reach the same version a CLI update would, so these
 // rules mirror scripts/install.mjs. Only the decisions live here: every Git or
@@ -167,23 +168,15 @@ function readMetadata(metadata) {
 function inferChannel({ symbolicBranch = null, metadata = undefined, headTags = [], defaultBranch = 'main' }) {
     validateRef(defaultBranch, 'default branch');
     const stored = readMetadata(metadata);
-    if (stored) {
-        return Object.freeze({ branch: stored.branch, mode: stored.mode, tag: stored.tag, source: 'metadata' });
-    }
-    if (typeof symbolicBranch === 'string' && symbolicBranch.length > 0) {
-        const branch = validateRef(symbolicBranch, 'branch');
-        return Object.freeze({
-            branch,
-            mode: branch === defaultBranch ? MODE_TAG : MODE_COMMIT,
-            tag: null,
-            source: 'branch',
-        });
-    }
-    // A detached HEAD on an exact tag is how older tag installs look. Git
-    // decides that, never package.json: v0.3.1 still declared version 0.3.0.
-    if (Array.isArray(headTags) && headTags.length > 0) {
-        return Object.freeze({ branch: defaultBranch, mode: MODE_TAG, tag: headTags[0], source: 'tag' });
-    }
+    if (symbolicBranch !== null) validateRef(symbolicBranch, 'branch');
+    const channel = inferUpdateChannel({
+        symbolicBranch,
+        recordedBranch: stored?.branch,
+        recordedTag: stored?.tag,
+        headTag: Array.isArray(headTags) ? headTags[0] : null,
+        defaultBranch,
+    });
+    if (channel) return channel;
     fail(
         'UPDATER_CHANNEL_UNKNOWN',
         'This installation does not record which release channel it follows. Run the installer once to record it, then retry.',
@@ -241,7 +234,7 @@ async function planUpdate({
         // The installed revision is not behind the tag. On the same tag channel
         // a revision ahead of the newest tag is kept, because the project never
         // downgrades on its own.
-        const trackingBranch = stored?.branch || installedBranch || channel.branch;
+        const trackingBranch = installedBranch || stored?.branch || channel.branch;
         if (channel.mode === MODE_TAG && trackingBranch === channel.branch && await isAncestor(target.commit, installedHead)) {
             return Object.freeze({
                 action: ACTION_KEEP_AHEAD,
@@ -256,7 +249,7 @@ async function planUpdate({
         );
     }
 
-    const channelUnchanged = channel.mode === MODE_TAG || installedBranch === channel.branch;
+    const channelUnchanged = installedBranch === (channel.mode === MODE_TAG ? null : channel.branch);
     if (installedHead === target.commit && channelUnchanged && sameChannel && dirtyTrackedCount === 0) {
         return Object.freeze({
             action: ACTION_UNCHANGED,
