@@ -11,6 +11,12 @@
 - 新增三条管理员接口 `GET/POST /api/plugins/vertex-paygo/update` 与 `GET /api/plugins/vertex-paygo/update/status`，并在 `/health` 的 `capabilities` 中增加 `updater` 字段。规则与恢复边界见 [docs/in-app-updates.md](docs/in-app-updates.md)。
 - 宿主的 `enableServerPluginsAutoUpdate` 与 Luker 自带的扩展更新按钮不受影响，也不会被本功能修改；固定版本的用户需自行关闭宿主自动更新。
 
+## 2026-10-16 · 0.5.1 请求失败诊断配套版本
+
+- 与前端 v0.5.1 配套发布，更新插件版本标识，协议保持 v2。
+- 前端在准备或参数校验失败时终止生成，保留本插件返回的错误码、消息及 HTTP 状态，不再由失败兜底请求触发二次 CSRF 错误。
+- 服务端认证、票据和回环代理行为沿用 v0.5.0。
+
 ## 2026-10-14 · 0.5.0 Google OpenAI 兼容桥接
 
 - 发布前后端配套 0.5.0（沿用预发布渠道）；从仅内存保存的旧版桥接升级后需首次手动启用，已有持久化配置继续使用，之后按保存状态自动恢复。桥接仅支持 SillyTavern/Luker，不支持 TauriTavern。
