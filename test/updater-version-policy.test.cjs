@@ -136,7 +136,7 @@ test('a clean installation behind the newest tag updates to it', async () => {
     assert.equal(plan.commit, 'c3');
 });
 
-test('local changes and local commits block the update unless it is forced', async () => {
+test('local changes and local commits block the update', async () => {
     const isAncestor = ancestry(new Map([['c3', 'c2'], ['c2', 'c1']]));
     const base = {
         installedHead: 'c1',
@@ -148,8 +148,6 @@ test('local changes and local commits block the update unless it is forced', asy
     };
     await assert.rejects(planUpdate({ ...base, dirtyTrackedCount: 2 }), error => error.code === 'UPDATER_LOCAL_CHANGES');
     await assert.rejects(planUpdate({ ...base, installedHead: 'local' }), error => error.code === 'UPDATER_LOCAL_COMMITS');
-    assert.equal((await planUpdate({ ...base, dirtyTrackedCount: 2, forced: true })).action, ACTION_UPDATE);
-    assert.equal((await planUpdate({ ...base, installedHead: 'local', forced: true })).action, ACTION_UPDATE);
 });
 
 test('an installation ahead of the newest tag is kept, not downgraded', async () => {

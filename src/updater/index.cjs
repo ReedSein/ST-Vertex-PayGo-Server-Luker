@@ -41,8 +41,6 @@ const COMPONENTS = Object.freeze([
     Object.freeze({ name: 'server', label: 'server plugin', remote: OFFICIAL_REMOTES.server }),
 ]);
 
-const REPORT_FILE = 'updater-report.json';
-
 // The activated tree must still be the component it claims to be, must still
 // have its entry point, and must not smuggle symlinks into the host.
 function verifyPayload(component, directory) {
@@ -182,19 +180,14 @@ function createUpdater({
         assertSafeLayout(resolved, located.map(component => component.directory), path.join(resolved.updateRoot, transaction.BACKUP_ROOT));
         const staging = transaction.createStaging(resolved.updateRoot);
         try {
-            const tagsByRemote = new Map();
-            for (const component of COMPONENTS) {
-                if (tagsByRemote.has(component.remote)) continue;
+            const planned = [];
+            for (const component of located) {
                 const entries = await gitOperations.listRemoteTags(component.remote);
                 const namesByCommit = new Map();
                 for (const entry of entries) {
                     namesByCommit.set(entry.commit, [...(namesByCommit.get(entry.commit) ?? []), entry.name]);
                 }
-                tagsByRemote.set(component.remote, { entries, namesByCommit });
-            }
-            const planned = [];
-            for (const component of located) {
-                planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote)));
+                planned.push(await planComponent(component, staging, { entries, namesByCommit }));
             }
             const tagged = planned.filter(component => component.channel?.mode === 'tag');
             if (tagged.length === 2 && tagged[0].target.tag !== tagged[1].target.tag) {
@@ -267,9 +260,7 @@ function createUpdater({
 
     async function run() {
         let plan = null;
-        const backup = { directory: null };
         let lock = null;
-        let activated = [];
         try {
             // Share the installer's lock throughout preparation, then recheck
             // snapshots to catch edits by tools that do not honor this lock.
@@ -329,35 +320,21 @@ function createUpdater({
             }));
             assertSafeLayout(resolved, plan.components.map(component => component.directory), path.join(resolved.updateRoot, transaction.BACKUP_ROOT));
             await dataBackups?.beforeUpdate();
-            backup.directory = transaction.createBackup(resolved.updateRoot, entries);
-            activated = transaction.activate({ rootDir: resolved.updateRoot, backup: backup.directory, entries });
+            const backup = transaction.createBackup(resolved.updateRoot, entries);
+            transaction.activate({ rootDir: resolved.updateRoot, backup, entries });
 
             const components = plan.components.map(component => (component.status === ACTION_UPDATE
                 ? { ...publicComponent(component), status: 'updated' }
                 : publicComponent(component)));
-            fs.writeFileSync(path.join(backup.directory, REPORT_FILE), `${JSON.stringify({
-                finishedAt: now().toISOString(),
-                components,
-            }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
             lastResult = {
                 status: 'updated',
                 finishedAt: now().toISOString(),
-                backup: backup.directory,
+                backup,
                 restartRequired: true,
                 components,
             };
             note('info', 'updater_updated', { components: changing.map(component => component.name).join(',') });
             return lastResult;
-        } catch (error) {
-            if (activated.length > 0 && backup.directory !== null) {
-                const errors = transaction.rollback(activated);
-                if (errors.length > 0) {
-                    note('error', 'updater_rollback_incomplete', { detail: errors.join('; ').slice(0, 256) });
-                    throw new PluginError(500, 'UPDATER_ROLLBACK_INCOMPLETE',
-                        `Update failed and rollback was incomplete: ${errors.join('; ')}. Recover from ${backup.directory}.`, { cause: error });
-                }
-            }
-            throw error;
         } finally {
             if (lock !== null) {
                 try {

@@ -163,7 +163,6 @@ test('an update replaces both components, records the channel, and keeps a usabl
         const restore = JSON.parse(fs.readFileSync(path.join(result.backup, 'restore.json'), 'utf8'));
         assert.deepEqual(restore.components.map(component => component.name), ['frontend', 'server']);
         assert.equal(fs.readFileSync(path.join(result.backup, 'frontend', 'index.js'), 'utf8'), 'old frontend\n');
-        assert.equal(fs.existsSync(path.join(result.backup, 'updater-report.json')), true);
 
         // No lock or staging directory survives a successful update.
         assert.deepEqual(fs.readdirSync(host.root).filter(name => name.startsWith('.paygo-install')).sort(), ['.paygo-install-backups']);
@@ -455,4 +454,28 @@ test('a clean Git tree with backed-up data inside a component is refused before 
     assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
     assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
     assert.deepEqual(fs.readdirSync(host.root).filter(name => name.startsWith('.paygo-install')), []);
+});
+
+test('a second activation failure restores both installed components and reports the transaction error', async () => {
+    const host = makeHost();
+    const rename = fs.renameSync;
+    fs.renameSync = (from, to) => {
+        if (to === host.server && path.dirname(from).includes('.paygo-install-stage-')) {
+            const error = new Error('fixture second activation failed');
+            error.code = 'EIO';
+            throw error;
+        }
+        return rename(from, to);
+    };
+    try {
+        const result = await makeUpdater(host).start();
+        assert.equal(result.status, 'failed');
+        assert.equal(result.code, 'UPDATER_ACTIVATION_FAILED');
+        assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+        assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+        assert.equal(fs.existsSync(path.join(host.root, '.paygo-install.lock')), false);
+    } finally {
+        fs.renameSync = rename;
+        fs.rmSync(host.root, { recursive: true, force: true });
+    }
 });

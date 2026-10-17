@@ -113,7 +113,9 @@ The layout is checked again before replacement.
    any changed during preparation, stop before replacing either component.
 5. Create the backup and its `restore.json`, then rename each
    target aside and the prepared copy into place.
-6. Write `updater-report.json` into the backup and release the lock.
+6. Publish the result through the status endpoint and existing server log, then
+   release the lock. `restore.json` and the saved components are the on-disk
+   recovery material.
 
 An error during preparation changes nothing. An error during activation rolls
 back from the backup; if rollback itself fails, the reply names the backup

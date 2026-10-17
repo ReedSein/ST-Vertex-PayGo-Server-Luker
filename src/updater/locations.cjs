@@ -20,8 +20,6 @@ const { PluginError } = require('../errors.cjs');
 // whatever origin a copy happens to carry. The installed origin is read only
 // to report a mismatch.
 
-const FRONTEND_DIRECTORY = 'ST-Vertex-PayGo';
-const SERVER_DIRECTORY = 'ST-Vertex-PayGo-Server';
 const FRONTEND_DISPLAY_NAME = 'Vertex AI PayGo Tiers';
 const SERVER_PACKAGE_NAME = 'st-vertex-paygo-server';
 const METADATA_FILE = 'paygo-updater.json';
@@ -189,17 +187,11 @@ function serverDirectory() {
     return path.resolve(__dirname, '..', '..');
 }
 
-function metadataPath(directory) {
-    return path.join(directory, '.git', METADATA_FILE);
-}
-
 module.exports = {
     DEFAULT_EXTENSIONS_PATH,
     DEFAULT_PLUGINS_PATH,
-    FRONTEND_DIRECTORY,
     METADATA_FILE,
     OFFICIAL_REMOTES,
-    SERVER_DIRECTORY,
     assertSafeLayout,
     componentIdentity,
     extensionRoots,
@@ -207,7 +199,6 @@ module.exports = {
     inside,
     isDirectory,
     locateComponent,
-    metadataPath,
     resolveDirectories,
     resolveWithinHost,
     serverDirectory,

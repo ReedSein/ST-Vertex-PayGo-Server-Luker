@@ -192,8 +192,6 @@ async function planUpdate({
     target,
     branchHead,
     isAncestor,
-    forced = false,
-    reference = null,
 }) {
     if (typeof installedHead !== 'string' || installedHead.length === 0) {
         fail('UPDATER_NOT_INSTALLED', 'No installed Git revision was found for this component.');
@@ -211,13 +209,13 @@ async function planUpdate({
         fail('UPDATER_CHANNEL_UNKNOWN', 'The release channel is unknown.');
     }
 
-    if (dirtyTrackedCount > 0 && !forced) {
+    if (dirtyTrackedCount > 0) {
         fail(
             'UPDATER_LOCAL_CHANGES',
             `${dirtyTrackedCount} files have local changes or are untracked. Back them up and replace with the installer's --replace-modified option instead.`,
         );
     }
-    if (!forced && !await isAncestor(installedHead, branchHead)) {
+    if (!await isAncestor(installedHead, branchHead)) {
         fail(
             'UPDATER_LOCAL_COMMITS',
             'The installed copy contains commits that are not on the selected branch. Use the installer with --replace-modified to back them up and replace them.',
@@ -230,7 +228,7 @@ async function planUpdate({
         && stored.mode === channel.mode
         && stored.tag === (channel.mode === MODE_TAG ? target.name : null);
 
-    if (!forced && !await isAncestor(installedHead, target.commit)) {
+    if (!await isAncestor(installedHead, target.commit)) {
         // The installed revision is not behind the tag. On the same tag channel
         // a revision ahead of the newest tag is kept, because the project never
         // downgrades on its own.
@@ -265,7 +263,6 @@ async function planUpdate({
         commit: target.commit,
         branch: channel.branch,
         mode: channel.mode,
-        reference,
     });
 }
 
