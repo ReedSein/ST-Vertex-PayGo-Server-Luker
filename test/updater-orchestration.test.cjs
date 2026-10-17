@@ -13,8 +13,11 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 
 const { createUpdater } = require('../src/updater/index.cjs');
+const { createGitOperations } = require('../src/updater/git-operations.cjs');
+const { createDataBackups } = require('../src/data-backups.cjs');
 
 const FRONTEND_REMOTE = 'https://github.com/mananekoha114/ST-Vertex-PayGo.git';
 const SERVER_REMOTE = 'https://github.com/mananekoha114/ST-Vertex-PayGo-Server.git';
@@ -96,7 +99,7 @@ function installation(directory, { head, metadata, remote, dirtyTrackedCount = 0
 
 function makeUpdater(host, overrides = {}, operations = {}, context = {}) {
     return createUpdater({
-        config: { values: {}, source: 'absent' },
+        commandLine: { dataRoot: './data', configPath: './config.yaml' },
         rootDir: host.root,
         now: () => new Date('2026-10-15T00:00:00.000Z'),
         gitOperations: { ...makeGitOperations({
@@ -190,7 +193,7 @@ test('APK updates stage, lock, back up and replace inside external data storage'
             assert.equal(fs.existsSync(path.join(host.root, '.paygo-install.lock')), false);
             return [{ name: 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_TIP : SERVER_TIP }];
         },
-    }, { config: { values, source: 'config' }, pluginDirectory: host.server });
+    }, { commandLine: { ...values, configPath: './external.yaml' }, pluginDirectory: host.server });
     const result = await updater.start();
     assert.equal(result.status, 'updated', result.message);
     assert.equal(path.dirname(path.dirname(result.backup)), data);
@@ -206,11 +209,11 @@ test('a job keeps one host directory snapshot throughout preparation and activat
     const host = makeHost();
     t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
     let reads = 0;
-    const config = { source: 'config', get values() {
+    const commandLine = { dataRoot: './data', configPath: './config.yaml', get serverPluginsPath() {
         reads++;
-        return reads === 1 ? {} : { serverPluginsPath: path.join(host.root, 'changed-plugins') };
+        return reads === 1 ? './plugins' : './changed-plugins';
     } };
-    const result = await makeUpdater(host, {}, {}, { config }).start();
+    const result = await makeUpdater(host, {}, {}, { commandLine }).start();
     assert.equal(result.status, 'updated', result.message);
     assert.equal(reads, 1);
 });
@@ -405,4 +408,51 @@ test('the installation lock covers preparation and concurrent starts are refused
     const task = updater.start();
     assert.throws(() => updater.start(), error => error.code === 'UPDATER_IN_PROGRESS');
     assert.equal((await task).status, 'updated');
+});
+
+test('a clean Git tree with backed-up data inside a component is refused before downloads', async t => {
+    if (spawnSync('git', ['--version']).status !== 0) return t.skip('System Git is required for the clean-tree comparison.');
+    const host = makeHost();
+    t.after(() => fs.rmSync(host.root, { recursive: true, force: true }));
+    const dataRoot = path.join(host.server, 'node_modules', 'host-data');
+    const userRoot = path.join(dataRoot, 'alice');
+    const ledger = path.join(userRoot, 'vertex-paygo', 'usage-ledger.jsonl');
+    writeText(ledger, '{"id":"saved-record"}\n');
+    writeText(path.join(host.server, '.gitignore'), 'node_modules/\n');
+    const git = args => {
+        const result = spawnSync('git', args, { cwd: host.server, encoding: 'utf8', env: {
+            ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull,
+        } });
+        assert.equal(result.status, 0, result.stderr);
+        return result.stdout.trim();
+    };
+    git(['init', '-q', '-b', 'main']);
+    git(['add', '.']);
+    git(['-c', 'user.name=fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture']);
+    const user = { user: { profile: { handle: 'alice' }, directories: {
+        root: userRoot, backups: path.join(userRoot, 'backups'),
+    } } };
+    const dataBackups = createDataBackups({ runtime: { dataBackupContext: async () => ({ users: [user], retention: 2 }) } });
+    await dataBackups.initialize();
+    const snapshot = dataBackups.list(user).entries[0];
+    assert.equal(snapshot.restorable, true);
+    assert.equal(git(['status', '--porcelain']), '');
+    assert.equal((await createGitOperations().readInstallation(host.server)).dirtyTrackedCount, 0);
+    let downloads = 0;
+    const commandLine = { dataRoot, configPath: path.join(host.root, 'config.yaml') };
+    const updater = makeUpdater(host, {}, {
+        async listRemoteTags(url) {
+            downloads++;
+            return [{ name: 'v0.5.0', commit: url === FRONTEND_REMOTE ? FRONTEND_TIP : SERVER_TIP }];
+        },
+    }, { dataBackups, commandLine });
+    const result = await updater.start();
+    assert.equal(result.status, 'failed');
+    assert.equal(result.code, 'UPDATER_UNSAFE_PATH');
+    assert.equal(downloads, 0);
+    assert.equal(fs.readFileSync(ledger, 'utf8'), '{"id":"saved-record"}\n');
+    assert.equal(fs.existsSync(path.join(userRoot, 'backups', snapshot.id)), true);
+    assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+    assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+    assert.deepEqual(fs.readdirSync(host.root).filter(name => name.startsWith('.paygo-install')), []);
 });

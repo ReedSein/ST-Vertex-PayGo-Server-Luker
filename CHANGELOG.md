@@ -14,6 +14,7 @@
 - 默认通道与安装器共用可校验规则：当前检出分支优先于旧记录，一次 `--mode commit` 不会固定 main 的后续默认策略；同时核对标签检出的分离 HEAD，避免错误地跳过必要切换。
 - 更新前覆盖异步祖先校验、未跟踪文件保护与配套标签检查；准备全程持有安装锁，激活前重新核对安装状态，拒绝路径软链接和损坏的通道记录。补充真实 Git 对照、进程中断及备份恢复测试。
 - 适配 Luker APK 的独立数据目录：配置目录与实际加载的后端位置吻合时，在同一数据存储内暂存、备份和替换；每轮操作使用一份目录快照，继续拒绝越界、混合存储根与软链接。
+- 目录以运行宿主已解析的参数为准，支持自定义配置路径并避免未启用的根配置干扰更新；下载前拒绝会把活动数据、配置或恢复材料随组件移走的布局。
 - 新增三条管理员接口 `GET/POST /api/plugins/vertex-paygo/update` 与 `GET /api/plugins/vertex-paygo/update/status`，并在 `/health` 的 `capabilities` 中增加 `updater` 字段。规则与恢复边界见 [docs/in-app-updates.md](docs/in-app-updates.md)。
 - 宿主的 `enableServerPluginsAutoUpdate` 与 Luker 自带的扩展更新按钮不受影响，也不会被本功能修改；固定版本的用户需自行关闭宿主自动更新。
 

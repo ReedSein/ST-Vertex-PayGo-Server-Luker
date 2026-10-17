@@ -15,6 +15,7 @@ const { PluginError } = require('../errors.cjs');
 const { createGitOperations } = require('./git-operations.cjs');
 const {
     OFFICIAL_REMOTES,
+    assertSafeLayout,
     locateComponent,
     resolveDirectories,
     serverDirectory,
@@ -91,7 +92,7 @@ function createUpdater({
     logStore = null,
     dataBackups = null,
     gitOperations = createGitOperations(),
-    config = undefined,
+    commandLine = globalThis.COMMAND_LINE_ARGS,
     rootDir = null,
     pluginDirectory = serverDirectory(),
     now = () => new Date(),
@@ -109,7 +110,7 @@ function createUpdater({
     }
 
     function directories() {
-        return resolveDirectories(hostRoot, { config, pluginDirectory });
+        return resolveDirectories(hostRoot, { commandLine, pluginDirectory });
     }
 
     function locate(component, resolved) {
@@ -132,8 +133,8 @@ function createUpdater({
     }
 
     // Everything a decision needs, with nothing written to the installation.
-    async function planComponent(component, staging, tags, resolved) {
-        const directory = locate(component, resolved);
+    async function planComponent(component, staging, tags) {
+        const directory = component.directory;
         const installation = await gitOperations.readInstallation(directory);
         const base = {
             name: component.name,
@@ -177,6 +178,8 @@ function createUpdater({
     }
 
     async function planAll(resolved) {
+        const located = COMPONENTS.map(component => ({ ...component, directory: locate(component, resolved) }));
+        assertSafeLayout(resolved, located.map(component => component.directory), path.join(resolved.updateRoot, transaction.BACKUP_ROOT));
         const staging = transaction.createStaging(resolved.updateRoot);
         try {
             const tagsByRemote = new Map();
@@ -190,8 +193,8 @@ function createUpdater({
                 tagsByRemote.set(component.remote, { entries, namesByCommit });
             }
             const planned = [];
-            for (const component of COMPONENTS) {
-                planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote), resolved));
+            for (const component of located) {
+                planned.push(await planComponent(component, staging, tagsByRemote.get(component.remote)));
             }
             const tagged = planned.filter(component => component.channel?.mode === 'tag');
             if (tagged.length === 2 && tagged[0].target.tag !== tagged[1].target.tag) {
@@ -324,6 +327,7 @@ function createUpdater({
                 target: component.directory,
                 staged: component.staged,
             }));
+            assertSafeLayout(resolved, plan.components.map(component => component.directory), path.join(resolved.updateRoot, transaction.BACKUP_ROOT));
             await dataBackups?.beforeUpdate();
             backup.directory = transaction.createBackup(resolved.updateRoot, entries);
             activated = transaction.activate({ rootDir: resolved.updateRoot, backup: backup.directory, entries });

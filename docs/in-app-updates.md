@@ -84,6 +84,11 @@ uses the bundled JavaScript implementation. Unsupported tag names fail explicitl
 
 ## What an update does
 
+Directory resolution follows the running host's resolved startup options,
+including `--dataRoot` and `--configPath`, and Luker's configurable plugin
+directories. The panel does not reread a separate root `config.yaml`; changing
+that file without restarting does not change the running host's paths.
+
 Directory hosts keep the CLI's lock, staging and backups in the program root.
 Luker APKs can keep both plugin directories outside the extracted program, under
 the configured `dataRoot`. That data root becomes the update storage boundary
@@ -92,6 +97,12 @@ loaded from its configured plugin directory. A filesystem root, mixed external
 roots and symlink paths are refused. Each operation resolves this layout once;
 staging and `.paygo-install-backups` then stay in the same storage as the APK's
 installed components. Recovery uses the targets recorded in `restore.json`.
+
+Before downloading, both component locations are checked together. A component
+must not contain the configured data root, its real path or the active config
+file. Components must not overlap each other or the code-backup directory.
+Components inside a data root, as used by APKs and per-user extensions, are valid.
+The layout is checked again before replacement.
 
 1. Take the installer's lock, check both components and clone the target revisions into a staging
    directory, still without touching an installation.

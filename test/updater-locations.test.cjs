@@ -15,12 +15,13 @@ const os = require('node:os');
 const path = require('node:path');
 
 const {
+    assertSafeLayout,
     componentIdentity,
     locateComponent,
-    readHostConfig,
     resolveDirectories,
     resolveWithinHost,
 } = require('../src/updater/locations.cjs');
+const { BACKUP_ROOT } = require('../src/updater/transaction.cjs');
 
 function writeJson(file, value) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
@@ -46,6 +47,26 @@ function cleanup(root) {
     fs.rmSync(root, { recursive: true, force: true });
 }
 
+function hostPaths(overrides = {}) {
+    return { dataRoot: './data', configPath: './config.yaml', ...overrides };
+}
+
+test('resolved host paths ignore an inactive broken root config', t => {
+    const root = makeHost({ config: '{{ invalid inactive YAML' });
+    t.after(() => cleanup(root));
+    const commandLine = { configPath: './active.yaml', dataRoot: './active-data',
+        serverPluginsPath: './active-plugins', globalExtensionsPath: './active-extensions' };
+    fs.writeFileSync(path.join(root, 'active.yaml'), 'dataRoot: ./active-data\n');
+    const parser = path.join(root, 'node_modules', 'yaml');
+    fs.mkdirSync(parser, { recursive: true });
+    fs.writeFileSync(path.join(parser, 'index.js'), 'exports.parse = () => { throw new SyntaxError("Inactive config was parsed"); };');
+    const resolved = resolveDirectories(root, { commandLine });
+    assert.equal(resolved.dataRootDirectory, path.join(root, 'active-data'));
+    assert.equal(resolved.configPath, path.join(root, 'active.yaml'));
+    assert.equal(resolved.pluginsDirectory, path.join(root, 'active-plugins'));
+    assert.equal(resolved.extensionsDirectory, path.join(root, 'active-extensions'));
+});
+
 test('identity comes from the manifest and package names the host already reads', () => {
     const root = makeHost();
     try {
@@ -63,7 +84,7 @@ test('both install locations are found, including per-user copies', () => {
     try {
         const userCopy = path.join(root, 'data', 'alice', 'extensions', 'ST-Vertex-PayGo');
         writeJson(path.join(userCopy, 'manifest.json'), { display_name: 'Vertex AI PayGo Tiers' });
-        const directories = resolveDirectories(root, { commandLine: null, config: { values: {}, source: 'absent' } });
+        const directories = resolveDirectories(root, { commandLine: hostPaths() });
         assert.deepEqual(locateComponent('frontend', directories), [
             path.join(root, 'data', 'alice', 'extensions', 'ST-Vertex-PayGo'),
             path.join(root, 'public', 'scripts', 'extensions', 'third-party', 'ST-Vertex-PayGo'),
@@ -74,23 +95,17 @@ test('both install locations are found, including per-user copies', () => {
     }
 });
 
-test('command-line overrides win over config.yaml, which wins over defaults', () => {
+test('host-resolved directories take precedence and fixed host paths use their defaults', () => {
     const root = makeHost({ config: JSON.stringify({ serverPluginsPath: './cfg-plugins', globalExtensionsPath: './cfg-ext', dataRoot: './cfg-data' }) });
     try {
-        const fromConfig = resolveDirectories(root, { commandLine: null, config: { values: { serverPluginsPath: './cfg-plugins', globalExtensionsPath: './cfg-ext', dataRoot: './cfg-data' }, source: 'config' } });
-        assert.equal(fromConfig.pluginsDirectory, path.join(root, 'cfg-plugins'));
-        assert.equal(fromConfig.extensionsDirectory, path.join(root, 'cfg-ext'));
-        assert.equal(fromConfig.dataRootDirectory, path.join(root, 'cfg-data'));
-
         const fromCommandLine = resolveDirectories(root, {
-            commandLine: { serverPluginsPath: './cli-plugins', globalExtensionsPath: './cli-ext', dataRoot: './cli-data' },
-            config: { values: { serverPluginsPath: './cfg-plugins' }, source: 'config' },
+            commandLine: hostPaths({ serverPluginsPath: './cli-plugins', globalExtensionsPath: './cli-ext', dataRoot: './cli-data' }),
         });
         assert.equal(fromCommandLine.pluginsDirectory, path.join(root, 'cli-plugins'));
         assert.equal(fromCommandLine.extensionsDirectory, path.join(root, 'cli-ext'));
         assert.equal(fromCommandLine.dataRootDirectory, path.join(root, 'cli-data'));
 
-        const defaults = resolveDirectories(root, { commandLine: null, config: { values: {}, source: 'absent' } });
+        const defaults = resolveDirectories(root, { commandLine: hostPaths() });
         assert.equal(defaults.pluginsDirectory, path.join(root, 'plugins'));
         assert.equal(defaults.extensionsDirectory, path.join(root, 'public', 'scripts', 'extensions', 'third-party'));
         assert.equal(defaults.dataRootDirectory, path.join(root, 'data'));
@@ -116,46 +131,27 @@ test('managed paths outside the host root or through a symlink are refused', () 
     }
 });
 
-test('the host config is read with the host parser and fails loudly when unusable', () => {
-    const root = makeHost({ config: JSON.stringify({ globalExtensionsPath: './from-config' }) });
-    try {
-        // The fixture writes JSON, which is valid YAML, so a minimal parser stands in
-        // for the host module without changing what is being tested. requireFrom has
-        // the createRequire shape: a path in, a require function out.
-        const requireFrom = () => name => {
-            if (name !== 'yaml') throw new Error(`unexpected module: ${name}`);
-            return { parse: text => JSON.parse(text) };
-        };
-        const read = readHostConfig(root, { requireFrom });
-        assert.equal(read.source, 'config');
-        assert.equal(read.values.globalExtensionsPath, './from-config');
-        assert.equal(resolveDirectories(root, { commandLine: null, config: read }).extensionsDirectory, path.join(root, 'from-config'));
-
-        assert.throws(
-            () => readHostConfig(root, { requireFrom: () => { throw new Error('no yaml here'); } }),
-            error => error?.code === 'UPDATER_HOST_CONFIG_UNREADABLE',
-        );
-
-        const broken = makeHost({ config: '{{ not yaml' });
-        try {
-            assert.throws(
-                () => readHostConfig(broken, { requireFrom: () => () => ({ parse: text => JSON.parse(text) }) }),
-                error => error?.code === 'UPDATER_HOST_CONFIG_INVALID',
-            );
-        } finally {
-            cleanup(broken);
-        }
-    } finally {
-        cleanup(root);
+test('missing host-resolved data or config paths fail without guessing', t => {
+    const root = makeHost();
+    t.after(() => cleanup(root));
+    for (const commandLine of [null, {}, { dataRoot: './data' }, { configPath: './config.yaml' }]) {
+        assert.throws(() => resolveDirectories(root, { commandLine }), error => error.code === 'UPDATER_HOST_PATHS_UNAVAILABLE');
     }
 });
 
-test('a host without config.yaml falls back to the documented defaults', () => {
+test('a missing root config does not override the host global-mode paths', () => {
     const root = makeHost();
+    const global = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-global-'));
     try {
-        assert.equal(readHostConfig(root).source, 'absent');
+        const directories = resolveDirectories(root, { commandLine: hostPaths({
+            configPath: path.join(global, 'config.yaml'), dataRoot: path.join(global, 'data'),
+        }) });
+        assert.equal(directories.configPath, path.join(global, 'config.yaml'));
+        assert.equal(directories.dataRootDirectory, path.join(global, 'data'));
+        assert.equal(directories.pluginsDirectory, path.join(root, 'plugins'));
     } finally {
         cleanup(root);
+        cleanup(global);
     }
 });
 
@@ -168,8 +164,7 @@ test('APK components outside the program use their configured data root as the s
     writeJson(path.join(server, 'package.json'), { name: 'st-vertex-paygo-server' });
     writeJson(path.join(frontend, 'manifest.json'), { display_name: 'Vertex AI PayGo Tiers' });
     const options = {
-        commandLine: { dataRoot: data, serverPluginsPath: path.dirname(server), globalExtensionsPath: path.dirname(frontend) },
-        config: { values: {}, source: 'absent' },
+        commandLine: hostPaths({ dataRoot: data, serverPluginsPath: path.dirname(server), globalExtensionsPath: path.dirname(frontend) }),
         pluginDirectory: server,
     };
     const directories = resolveDirectories(root, options);
@@ -190,10 +185,43 @@ test('component discovery refuses a matching installation reached through a syml
         const frontend = path.join(root, 'public/scripts/extensions/third-party/ST-Vertex-PayGo');
         fs.renameSync(frontend, path.join(outside, 'frontend'));
         fs.symlinkSync(path.join(outside, 'frontend'), frontend);
-        const directories = resolveDirectories(root, { commandLine: null, config: { values: {}, source: 'absent' } });
+        const directories = resolveDirectories(root, { commandLine: hostPaths() });
         assert.throws(() => locateComponent('frontend', directories), error => error.code === 'UPDATER_UNSAFE_PATH');
     } finally {
         cleanup(root);
         cleanup(outside);
     }
+});
+
+test('replacement layouts preserve data, active configuration and recovery directories', t => {
+    const root = makeHost();
+    t.after(() => cleanup(root));
+    const directories = resolveDirectories(root, { commandLine: hostPaths() });
+    const frontend = locateComponent('frontend', directories)[0];
+    const server = locateComponent('server', directories)[0];
+    const backup = path.join(root, BACKUP_ROOT);
+    assert.doesNotThrow(() => assertSafeLayout(directories, [frontend, server], backup));
+    // Per-user frontends and APK components are inside dataRoot, which is safe.
+    assert.doesNotThrow(() => assertSafeLayout({ ...directories, dataRootDirectory: root }, [frontend, server], backup));
+    for (const dataRootDirectory of [server, path.join(server, 'node_modules', 'data')]) {
+        assert.throws(() => assertSafeLayout({ ...directories, dataRootDirectory }, [frontend, server], backup), error => error.code === 'UPDATER_UNSAFE_PATH');
+    }
+    assert.throws(() => assertSafeLayout({ ...directories, configPath: path.join(frontend, 'active.yaml') }, [frontend, server], backup), error => error.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => assertSafeLayout(directories, [frontend, path.join(frontend, 'server')], backup), error => error.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => assertSafeLayout(directories, [server, server], backup), error => error.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => assertSafeLayout(directories, [path.join(backup, 'frontend'), server], backup), error => error.code === 'UPDATER_UNSAFE_PATH');
+    assert.throws(() => assertSafeLayout(directories, [frontend, server], path.join(server, 'backups')), error => error.code === 'UPDATER_UNSAFE_PATH');
+});
+
+test('a data-root alias into a replaced component is also refused', t => {
+    const root = makeHost();
+    t.after(() => cleanup(root));
+    const directories = resolveDirectories(root, { commandLine: hostPaths() });
+    const frontend = locateComponent('frontend', directories)[0];
+    const server = locateComponent('server', directories)[0];
+    const data = path.join(server, 'node_modules', 'host-data');
+    fs.mkdirSync(data, { recursive: true });
+    const alias = path.join(root, 'linked-data');
+    fs.symlinkSync(data, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    assert.throws(() => assertSafeLayout({ ...directories, dataRootDirectory: alias }, [frontend, server], path.join(root, BACKUP_ROOT)), error => error.code === 'UPDATER_UNSAFE_PATH');
 });

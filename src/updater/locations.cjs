@@ -10,7 +10,6 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { createRequire } = require('node:module');
 const { PluginError } = require('../errors.cjs');
 
 // Where the two components live on this host, and how a directory proves it is
@@ -34,7 +33,6 @@ const OFFICIAL_REMOTES = Object.freeze({
 
 const DEFAULT_PLUGINS_PATH = 'plugins';
 const DEFAULT_EXTENSIONS_PATH = 'public/scripts/extensions/third-party';
-const DEFAULT_DATA_ROOT = 'data';
 
 function readJsonFile(file) {
     try {
@@ -92,57 +90,22 @@ function componentIdentity(component, directory) {
     return component === 'frontend' ? frontendIdentity(directory) : serverIdentity(directory);
 }
 
-// The loader requires the host's own YAML parser rather than bundling one.
-// The host always has it: config.yaml is how it starts.
-function readHostConfig(rootDir, { requireFrom = createRequire } = {}) {
-    const configPath = path.join(rootDir, 'config.yaml');
-    if (!fs.existsSync(configPath)) {
-        return { values: {}, source: 'absent' };
-    }
-    let parse;
-    try {
-        parse = requireFrom(path.join(rootDir, 'package.json'))('yaml').parse;
-    } catch (error) {
-        throw new PluginError(
-            500,
-            'UPDATER_HOST_CONFIG_UNREADABLE',
-            `The host YAML parser is unavailable, so the configured plugin and extension directories cannot be resolved: ${error?.message ?? error}`,
-            { cause: error },
-        );
-    }
-    let values;
-    try {
-        values = parse(fs.readFileSync(configPath, 'utf8'));
-    } catch (error) {
-        // Parser messages may quote secret values from config.yaml.
-        throw new PluginError(500, 'UPDATER_HOST_CONFIG_INVALID', 'config.yaml could not be parsed.', { cause: error });
-    }
-    if (values === null || typeof values !== 'object' || Array.isArray(values)) {
-        throw new PluginError(500, 'UPDATER_HOST_CONFIG_INVALID', 'config.yaml is not a YAML mapping.');
-    }
-    return { values, source: 'config', configPath };
-}
-
 function readStringOption(values, key) {
     const value = values?.[key];
     return typeof value === 'string' && value.length > 0 ? value : null;
 }
 
-// Command-line overrides win over config.yaml, exactly as the host resolves
-// them, and the host publishes them on globalThis at startup.
-function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARGS, config = undefined, pluginDirectory = serverDirectory() } = {}) {
+// Both hosts publish their resolved configuration and CLI overrides at startup.
+// SillyTavern's plugin directories are fixed; Luker publishes configurable ones.
+function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARGS, pluginDirectory = serverDirectory() } = {}) {
     rootDir = path.resolve(rootDir);
-    const hostConfig = config ?? readHostConfig(rootDir);
-    const values = hostConfig.values ?? {};
-    const pluginsPath = readStringOption(commandLine, 'serverPluginsPath')
-        ?? readStringOption(values, 'serverPluginsPath')
-        ?? DEFAULT_PLUGINS_PATH;
-    const extensionsPath = readStringOption(commandLine, 'globalExtensionsPath')
-        ?? readStringOption(values, 'globalExtensionsPath')
-        ?? DEFAULT_EXTENSIONS_PATH;
-    const dataRoot = readStringOption(commandLine, 'dataRoot')
-        ?? readStringOption(values, 'dataRoot')
-        ?? DEFAULT_DATA_ROOT;
+    const dataRoot = readStringOption(commandLine, 'dataRoot');
+    const configPath = readStringOption(commandLine, 'configPath');
+    if (!dataRoot || !configPath) {
+        throw new PluginError(500, 'UPDATER_HOST_PATHS_UNAVAILABLE', 'The host has not published its resolved data and configuration paths.');
+    }
+    const pluginsPath = readStringOption(commandLine, 'serverPluginsPath') ?? DEFAULT_PLUGINS_PATH;
+    const extensionsPath = readStringOption(commandLine, 'globalExtensionsPath') ?? DEFAULT_EXTENSIONS_PATH;
     const pluginsDirectory = path.resolve(rootDir, pluginsPath);
     const extensionsDirectory = path.resolve(rootDir, extensionsPath);
     const dataRootDirectory = path.resolve(rootDir, dataRoot);
@@ -171,8 +134,26 @@ function resolveDirectories(rootDir, { commandLine = globalThis.COMMAND_LINE_ARG
         pluginsDirectory: resolveWithinHost(updateRoot, pluginsDirectory),
         extensionsDirectory: resolveWithinHost(updateRoot, extensionsDirectory),
         dataRootDirectory,
-        configSource: hostConfig.source,
+        configPath: path.resolve(rootDir, configPath),
     });
+}
+
+// Moving a component must not move host data, configuration or recovery files.
+// A component inside dataRoot is normal for APKs and per-user extensions;
+// only the opposite containment would move the host's active data away.
+function assertSafeLayout(directories, targets, backupDirectory) {
+    const backupRoot = resolveWithinHost(directories.updateRoot, backupDirectory);
+    const protectedPaths = [directories.dataRootDirectory, directories.configPath];
+    for (const target of [...protectedPaths]) {
+        if (fs.existsSync(target)) protectedPaths.push(fs.realpathSync(target));
+    }
+    for (const [index, target] of targets.entries()) {
+        if (protectedPaths.some(protectedPath => inside(target, protectedPath))
+            || inside(target, backupRoot) || inside(backupRoot, target)
+            || targets.some((other, otherIndex) => otherIndex !== index && inside(target, other))) {
+            throw new PluginError(409, 'UPDATER_UNSAFE_PATH', 'Component directories must not contain host data, active configuration or recovery files, or overlap one another.');
+        }
+    }
 }
 
 // Both install locations the host supports: the global third-party directory
@@ -213,13 +194,13 @@ function metadataPath(directory) {
 }
 
 module.exports = {
-    DEFAULT_DATA_ROOT,
     DEFAULT_EXTENSIONS_PATH,
     DEFAULT_PLUGINS_PATH,
     FRONTEND_DIRECTORY,
     METADATA_FILE,
     OFFICIAL_REMOTES,
     SERVER_DIRECTORY,
+    assertSafeLayout,
     componentIdentity,
     extensionRoots,
     frontendIdentity,
@@ -227,7 +208,6 @@ module.exports = {
     isDirectory,
     locateComponent,
     metadataPath,
-    readHostConfig,
     resolveDirectories,
     resolveWithinHost,
     serverDirectory,
