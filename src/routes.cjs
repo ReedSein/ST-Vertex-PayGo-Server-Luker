@@ -17,6 +17,7 @@ const {
 const { createClientLogHandler, createReadLogsHandler } = require('./log-routes.cjs');
 const { createPrepareHandler } = require('./prepare-route.cjs');
 const { createUsageHandler } = require('./usage-route.cjs');
+const { registerDataBackupRoutes } = require('./data-backup-routes.cjs');
 const {
     createCheckUpdateHandler,
     createStartUpdateHandler,
@@ -42,6 +43,7 @@ function registerRoutes(router, dependencies) {
                 logs: isAdmin,
                 clientLogging: isAdmin,
                 usage: true,
+                dataBackups: Boolean(dependencies.dataBackups),
                 // Absent means the backend predates the panel updater; false
                 // means the caller is not an administrator.
                 updater: isAdmin && Boolean(dependencies.updater),
@@ -60,6 +62,7 @@ function registerRoutes(router, dependencies) {
     router.post('/logs/client', createClientLogHandler(dependencies));
     router.post('/prepare', createPrepareHandler(dependencies));
     router.post('/update', createStartUpdateHandler(dependencies));
+    if (dependencies.dataBackups) registerDataBackupRoutes(router, dependencies.dataBackups);
     if (dependencies.openaiBridge) {
         router.get('/openai-bridge', (request, response) => dependencies.openaiBridge.get(request, response));
         router.post('/openai-bridge', (request, response) => dependencies.openaiBridge.update(request, response));

@@ -200,6 +200,8 @@ Google AI Studio 的 Standard 与 Flex 模式复用相同的预检机制、鉴�
 
 账本以追加式 JSON Lines 存放在当前 SillyTavern 用户目录的 `vertex-paygo/usage-ledger.jsonl`，不会像运行日志一样在启动时清空，也不会为了写入新记录而重写全部历史。没有 `usageChatId` 的后台请求仍会正常代理，但不会建立无法查询的账本记录，`usageId` 返回 `null`。
 
+**数据恢复点**：插件启动、界面实际更新前及执行恢复前，会为有变化的用量账本和桥接配置保存本机快照，按宿主 `backups.common.numberOfBackups` 保留份数轮换。PayGo 面板中的“恢复数据”可选择当前用户的快照，确认后重启生效；恢复前保留原文件。快照包含当时的桥接开关与访问 key，应按敏感配置保管。它不是持续备份，不重复备份聊天、Google 凭据或日志；Luker 完整 ZIP 选择“设置”可带走快照，导回后再在 PayGo 中选择应用。限制、接口及失败恢复见[数据备份说明](docs/data-backups.md)。
+
 `GET /api/plugins/vertex-paygo/usage?chatId=...&limit=200&cursor=...` 只根据已认证用户自己的目录读取指定对话；`chatId` 本身不是访问凭据。每页默认 200 条、最多 500 条，存在后续页时返回 `nextCursor` 和 `truncated: true`。游标固定第一页看到的记录快照，因此翻页期间的新生成不会造成无限翻页。没有真实用户目录的匿名请求不能读取账本。
 
 记录状态为 `pending`、`complete`、`incomplete` 或 `failed`。只有捕获到有效 `usageMetadata` 才会标为 `complete`；缺失用量不会按 0 token 或 0 费用处理。新进程首次访问账本时会立即把上个进程遗留的 `pending` 记录持久化为 `incomplete`。非流响应使用增量 JSON 扫描，只保留顶层 `usageMetadata`；大型模型内容不会进入账本缓冲。单个超限 SSE 事件会被跳过，后续事件仍会继续检查。

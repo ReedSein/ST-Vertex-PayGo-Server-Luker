@@ -108,6 +108,32 @@ function makeUpdater(host, overrides = {}, operations = {}, context = {}) {
     });
 }
 
+test('data snapshots run only for a real update and before installed files change', async () => {
+    const host = makeHost(); let captures = 0;
+    try {
+        const updater = makeUpdater(host, {}, {}, { dataBackups: { beforeUpdate() {
+            captures++;
+            assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+            assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+        } } });
+        await updater.check(); assert.equal(captures, 0);
+        await updater.start(); assert.equal(captures, 1);
+        assert.equal(updater.status().lastResult.status, 'updated');
+    } finally { fs.rmSync(host.root, { recursive: true, force: true }); }
+});
+
+test('a failed data snapshot stops code replacement and preserves the installed pair', async () => {
+    const host = makeHost();
+    try {
+        const updater = makeUpdater(host, {}, {}, { dataBackups: { beforeUpdate() { throw new Error('snapshot write failed'); } } });
+        await updater.start();
+        assert.equal(updater.status().lastResult.status, 'failed');
+        assert.equal(fs.readFileSync(path.join(host.frontend, 'index.js'), 'utf8'), 'old frontend\n');
+        assert.equal(fs.readFileSync(path.join(host.server, 'index.cjs'), 'utf8'), 'old server\n');
+        assert.equal(fs.existsSync(path.join(host.root, '.paygo-install-backups')), false);
+    } finally { fs.rmSync(host.root, { recursive: true, force: true }); }
+});
+
 test('an update replaces both components, records the channel, and keeps a usable backup', async () => {
     const host = makeHost();
     try {

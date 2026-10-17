@@ -89,6 +89,7 @@ function assertNoSymlinks(directory) {
 
 function createUpdater({
     logStore = null,
+    dataBackups = null,
     gitOperations = createGitOperations(),
     config = undefined,
     rootDir = null,
@@ -323,6 +324,7 @@ function createUpdater({
                 target: component.directory,
                 staged: component.staged,
             }));
+            await dataBackups?.beforeUpdate();
             backup.directory = transaction.createBackup(resolved.updateRoot, entries);
             activated = transaction.activate({ rootDir: resolved.updateRoot, backup: backup.directory, entries });
 
