@@ -57,7 +57,7 @@ test('activation replaces both components and keeps the previous contents in the
     const root = makeRoot();
     try {
         const staging = createStaging(root);
-        assert.equal(fs.statSync(staging).mode & 0o777, 0o700);
+        if (process.platform !== 'win32') assert.equal(fs.statSync(staging).mode & 0o777, 0o700);
         const stagedFrontend = path.join(staging, 'frontend');
         const stagedServer = path.join(staging, 'server');
         write(path.join(stagedFrontend, 'index.js'), 'new frontend');
@@ -73,7 +73,7 @@ test('activation replaces both components and keeps the previous contents in the
             { name: 'server', target: serverTarget, staged: stagedServer },
         ];
         const backup = createBackup(root, entries);
-        assert.equal(fs.statSync(backup).mode & 0o777, 0o700);
+        if (process.platform !== 'win32') assert.equal(fs.statSync(backup).mode & 0o777, 0o700);
         const restore = JSON.parse(read(path.join(backup, 'restore.json')));
         assert.equal(restore.components.length, 2);
         assert.deepEqual(restore.components.map(entry => entry.name), ['frontend', 'server']);
@@ -154,11 +154,15 @@ test('targets outside the host root are refused before anything moves', () => {
     }
 });
 
-test('a backup directory symlink cannot redirect writes outside the host', () => {
+test('a backup directory symlink cannot redirect writes outside the host', t => {
     const root = makeRoot();
     const outside = makeRoot();
     try {
-        fs.symlinkSync(outside, path.join(root, '.paygo-install-backups'));
+        try { fs.symlinkSync(outside, path.join(root, '.paygo-install-backups'), process.platform === 'win32' ? 'junction' : 'dir'); }
+        catch (error) {
+            if (['EACCES', 'EPERM', 'ENOTSUP'].includes(error.code)) { t.skip('Directory link creation is unavailable: ' + error.code); return; }
+            throw error;
+        }
         assert.throws(() => createBackup(root, []), error => error.code === 'UPDATER_UNSAFE_PATH');
         assert.deepEqual(fs.readdirSync(outside), []);
     } finally {

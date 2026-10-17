@@ -44,7 +44,7 @@ test('startup snapshots are private, deduplicated and metadata-only; empty users
     assert.deepEqual(report.entries[0].files, FILES);
     assert.equal(JSON.stringify(report).includes(state.key), false);
     assert.equal(JSON.stringify(report).includes(f.root), false);
-    assert.equal(fs.statSync(path.join(f.alice.user.directories.backups, report.entries[0].id)).mode & 0o777, 0o600);
+    if (process.platform !== 'win32') assert.equal(fs.statSync(path.join(f.alice.user.directories.backups, report.entries[0].id)).mode & 0o777, 0o600);
     await service.beforeUpdate(); await f.make().initialize();
     assert.equal(service.list(f.alice).entries.length, 1);
     assert.equal(service.list(f.bob).entries.length, 0);
@@ -143,16 +143,24 @@ test('disabled backup configuration reports failure and preserves previous backu
     assert.equal(restarted.list(f.alice).entries[0].id, id);
 });
 
-test('untrusted paths, symlinks, hardlinks, other users and malformed paging are refused', async t => {
+test('untrusted paths, other users and malformed paging are refused', async t => {
     const f = fixture(t); f.put(f.alice, 'private');
     const service = f.make(); await service.initialize(); const id = service.list(f.alice).entries[0].id;
     assert.throws(() => service.list({}), { code: 'DATA_BACKUP_AUTH_REQUIRED' });
     assert.throws(() => service.schedule(f.bob, id), { code: 'DATA_BACKUP_INVALID' });
     assert.throws(() => service.schedule(f.alice, '../secrets.json'), { code: 'DATA_BACKUP_INVALID' });
     assert.throws(() => service.list(f.alice, { limit: 0 }), { code: 'DATA_BACKUP_INVALID_PAGE' });
+});
+
+test('file symlinks cannot redirect backup reads outside the user data', async t => {
+    const f = fixture(t); f.put(f.alice, 'private');
     const outside = path.join(f.root, 'external'); fs.writeFileSync(outside, 'untouched');
-    const file = f.file(f.alice, FILES[0]); fs.unlinkSync(file); fs.symlinkSync(outside, file);
-    await assert.rejects(service.beforeUpdate(), { code: 'DATA_BACKUP_UNSAFE_PATH' });
+    const file = f.file(f.alice, FILES[0]); fs.unlinkSync(file);
+    try { fs.symlinkSync(outside, file, 'file'); } catch (error) {
+        if (['EACCES', 'EPERM', 'ENOTSUP'].includes(error.code)) { t.skip('File symlink creation is unavailable: ' + error.code); return; }
+        throw error;
+    }
+    await assert.rejects(f.make().beforeUpdate(), { code: 'DATA_BACKUP_UNSAFE_PATH' });
     assert.equal(fs.readFileSync(outside, 'utf8'), 'untouched');
 });
 
@@ -161,7 +169,7 @@ test('hardlinked data files are refused on filesystems that support creating har
     const source = path.join(f.root, 'external'); fs.writeFileSync(source, 'untouched');
     const file = f.file(f.alice, FILES[0]); fs.unlinkSync(file);
     try { fs.linkSync(source, file); } catch (error) {
-        if (['EACCES', 'EPERM', 'ENOTSUP'].includes(error.code)) { t.skip('Android/filesystem denies hardlink creation: ' + error.code); return; }
+        if (['EACCES', 'EPERM', 'ENOTSUP'].includes(error.code)) { t.skip('Hardlink creation is unavailable: ' + error.code); return; }
         throw error;
     }
     await assert.rejects(f.make().beforeUpdate(), { code: 'DATA_BACKUP_UNSAFE_PATH' });

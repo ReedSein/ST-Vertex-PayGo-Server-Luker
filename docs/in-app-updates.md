@@ -147,6 +147,7 @@ it does not demonstrate Android APK crash recovery.
   button. Those paths do not understand the paired-tag release and can move a
   component to `main` independently. The panel reports the situation but never
   edits the host configuration; pinning a release means disabling that setting.
-- **Windows activation is untested.** Renaming a directory that contains loaded
-  modules works on Linux and Android. On Windows an open handle can make the
-  rename fail; the failure surfaces with the backup intact.
+- **Windows and macOS activation are untested.** On Windows an open handle can
+  make a rename fail; the failure is reported and rollback is attempted.
+  POSIX permission modes do not establish Windows ACLs. Platform-specific test
+  assertions are not a substitute for running an update on those systems.

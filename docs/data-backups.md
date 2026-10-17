@@ -17,11 +17,16 @@ Active data stays in its existing location:
 - `<user>/vertex-paygo/usage-ledger.jsonl`
 - `<user>/vertex-paygo/openai-bridge-state.json`
 
-Snapshots are private `vertex-paygo-data_<timestamp>_<uuid>.pgbak` files in the
+Snapshots are `vertex-paygo-data_<timestamp>_<uuid>.pgbak` files in the
 host's per-user `backups` directory. Each has a versioned JSON metadata header
 followed by a gzip body, with exact-byte sizes and SHA-256 checksums. The body
 may contain the bridge access key; protect snapshots like the original bridge
 configuration. List responses expose metadata only.
+
+On POSIX systems, snapshots are created with mode `0600`. On Windows, access
+depends on the host user directory's inherited ACL; the POSIX mode does not
+establish a private Windows ACL. Keep host user directories and exported
+snapshots restricted to their intended owner.
 
 Retention follows the host's positive integer
 `backups.common.numberOfBackups`. Only verified PayGo snapshot headers belonging

@@ -51,6 +51,18 @@ function hostPaths(overrides = {}) {
     return { dataRoot: './data', configPath: './config.yaml', ...overrides };
 }
 
+function linkDirectory(t, target, link) {
+    try { fs.symlinkSync(target, link, process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) {
+        if (['EACCES', 'EPERM', 'ENOTSUP'].includes(error.code)) {
+            t.skip('Directory link creation is unavailable: ' + error.code);
+            return false;
+        }
+        throw error;
+    }
+    return true;
+}
+
 test('resolved host paths ignore an inactive broken root config', t => {
     const root = makeHost({ config: '{{ invalid inactive YAML' });
     t.after(() => cleanup(root));
@@ -114,21 +126,22 @@ test('host-resolved directories take precedence and fixed host paths use their d
     }
 });
 
-test('managed paths outside the host root or through a symlink are refused', () => {
+test('managed paths outside the host root or equal to it are refused', () => {
     const root = makeHost();
     try {
         assert.throws(() => resolveWithinHost(root, path.join(root, '..', 'elsewhere')), error => error?.code === 'UPDATER_UNSAFE_PATH');
         assert.throws(() => resolveWithinHost(root, root), error => error?.code === 'UPDATER_UNSAFE_PATH');
-        const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-outside-'));
-        try {
-            fs.symlinkSync(outside, path.join(root, 'linked'));
-            assert.throws(() => resolveWithinHost(root, path.join(root, 'linked', 'payload')), error => error?.code === 'UPDATER_UNSAFE_PATH');
-        } finally {
-            cleanup(outside);
-        }
     } finally {
         cleanup(root);
     }
+});
+
+test('managed paths through a directory link are refused', t => {
+    const root = makeHost();
+    const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-outside-'));
+    t.after(() => { cleanup(root); cleanup(outside); });
+    if (!linkDirectory(t, outside, path.join(root, 'linked'))) return;
+    assert.throws(() => resolveWithinHost(root, path.join(root, 'linked', 'payload')), error => error.code === 'UPDATER_UNSAFE_PATH');
 });
 
 test('missing host-resolved data or config paths fail without guessing', t => {
@@ -155,7 +168,7 @@ test('a missing root config does not override the host global-mode paths', () =>
     }
 });
 
-test('APK components outside the program use their configured data root as the storage boundary', t => {
+test('APK components outside the program use their configured data root as the storage boundary', async t => {
     const root = makeHost();
     const data = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-apk-data-'));
     t.after(() => { cleanup(root); cleanup(data); });
@@ -174,17 +187,19 @@ test('APK components outside the program use their configured data root as the s
     assert.throws(() => resolveDirectories(root, { ...options, pluginDirectory: path.join(root, 'plugins/server') }), e => e.code === 'UPDATER_UNSAFE_PATH');
     assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, dataRoot: path.parse(data).root } }), e => e.code === 'UPDATER_UNSAFE_PATH');
     assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, globalExtensionsPath: path.join(root, 'public/extensions') } }), e => e.code === 'UPDATER_UNSAFE_PATH');
-    fs.symlinkSync(path.dirname(frontend), path.join(data, 'linked-extensions'));
-    assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, globalExtensionsPath: path.join(data, 'linked-extensions') } }), e => e.code === 'UPDATER_UNSAFE_PATH');
+    await t.test('external extension directories cannot cross a link', t => {
+        if (!linkDirectory(t, path.dirname(frontend), path.join(data, 'linked-extensions'))) return;
+        assert.throws(() => resolveDirectories(root, { ...options, commandLine: { ...options.commandLine, globalExtensionsPath: path.join(data, 'linked-extensions') } }), e => e.code === 'UPDATER_UNSAFE_PATH');
+    });
 });
 
-test('component discovery refuses a matching installation reached through a symlink', () => {
+test('component discovery refuses a matching installation reached through a symlink', t => {
     const root = makeHost();
     const outside = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-outside-'));
     try {
         const frontend = path.join(root, 'public/scripts/extensions/third-party/ST-Vertex-PayGo');
         fs.renameSync(frontend, path.join(outside, 'frontend'));
-        fs.symlinkSync(path.join(outside, 'frontend'), frontend);
+        if (!linkDirectory(t, path.join(outside, 'frontend'), frontend)) return;
         const directories = resolveDirectories(root, { commandLine: hostPaths() });
         assert.throws(() => locateComponent('frontend', directories), error => error.code === 'UPDATER_UNSAFE_PATH');
     } finally {
@@ -222,6 +237,6 @@ test('a data-root alias into a replaced component is also refused', t => {
     const data = path.join(server, 'node_modules', 'host-data');
     fs.mkdirSync(data, { recursive: true });
     const alias = path.join(root, 'linked-data');
-    fs.symlinkSync(data, alias, process.platform === 'win32' ? 'junction' : 'dir');
+    if (!linkDirectory(t, data, alias)) return;
     assert.throws(() => assertSafeLayout({ ...directories, dataRootDirectory: alias }, [frontend, server], path.join(root, BACKUP_ROOT)), error => error.code === 'UPDATER_UNSAFE_PATH');
 });
