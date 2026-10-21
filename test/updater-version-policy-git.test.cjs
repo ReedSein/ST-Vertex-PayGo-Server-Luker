@@ -21,7 +21,10 @@ const available = spawnSync('git', ['--version']).status === 0;
 function fixture(t) {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'paygo-policy-git-'));
     t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
-    const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull,
+    // Git for Windows cannot read Node's \\.\nul device path as a config file.
+    const globalConfig = path.join(directory, 'empty.gitconfig');
+    fs.writeFileSync(globalConfig, '');
+    const env = { ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig,
         GIT_AUTHOR_NAME: 'fixture', GIT_AUTHOR_EMAIL: 'fixture@example.invalid',
         GIT_COMMITTER_NAME: 'fixture', GIT_COMMITTER_EMAIL: 'fixture@example.invalid' };
     function git(args, { input, timestamp = 1000000000 } = {}) {
