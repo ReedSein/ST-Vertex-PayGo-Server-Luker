@@ -193,7 +193,12 @@ test('a process killed between replacements rolls back on the next startup', asy
     const id = service.list(f.alice).entries[0].id; f.put(f.alice, 'current'); service.schedule(f.alice, id);
     const source = `const fs=require('node:fs');const real=fs.renameSync;fs.renameSync=(a,b)=>{real(a,b);if(b===${JSON.stringify(f.file(f.alice, FILES[0]))})process.kill(process.pid,'SIGKILL')};require(${JSON.stringify(require.resolve('../src/data-backups.cjs'))}).createDataBackups({runtime:{dataBackupContext:async()=>(${JSON.stringify(f.context)})}}).initialize();`;
     const child = spawnSync(process.execPath, ['-e', source], { encoding: 'utf8', timeout: 10000 });
-    assert.equal(child.signal, 'SIGKILL');
+    assert.equal(child.error, undefined, child.stderr);
+    // Windows reports a forced termination as exit code 1 rather than a signal.
+    assert.equal(child.status, process.platform === 'win32' ? 1 : null, child.stderr);
+    assert.equal(child.signal, process.platform === 'win32' ? null : 'SIGKILL');
+    assert.match(fs.readFileSync(f.file(f.alice, FILES[0]), 'utf8'), /old/u);
+    assert.equal(JSON.parse(fs.readFileSync(f.file(f.alice, '.data-restore.json'), 'utf8')).status, 'applying');
     await f.make().initialize();
     assert.match(fs.readFileSync(f.file(f.alice, FILES[0]), 'utf8'), /current/u);
     assert.equal(service.list(f.alice).pending.status, 'failed');
