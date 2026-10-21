@@ -418,9 +418,11 @@ test('a clean Git tree with backed-up data inside a component is refused before 
     const ledger = path.join(userRoot, 'vertex-paygo', 'usage-ledger.jsonl');
     writeText(ledger, '{"id":"saved-record"}\n');
     writeText(path.join(host.server, '.gitignore'), 'node_modules/\n');
+    const globalConfig = path.join(host.root, 'empty.gitconfig');
+    writeText(globalConfig, '');
     const git = args => {
         const result = spawnSync('git', args, { cwd: host.server, encoding: 'utf8', env: {
-            ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: os.devNull,
+            ...process.env, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: globalConfig,
         } });
         assert.equal(result.status, 0, result.stderr);
         return result.stdout.trim();
